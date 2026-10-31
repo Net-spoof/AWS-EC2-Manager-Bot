@@ -21,13 +21,14 @@ from telegram.error import BadRequest, TelegramError
 from telegram.ext import Application, CallbackQueryHandler, CommandHandler, ContextTypes, MessageHandler, filters
 
 from .aws_api import (REGIONS, TYPES, available_regions, control_instance, cpu_metric, create_instance,
-                      instance_details, list_instances, monthly_cost, session_for_account, validate_account,
+                      instance_details, list_instances, monthly_cost, region_catalog, session_for_account, validate_account, valid_region_id,
                       valid_alias, validate_cidr)
 from .storage import Store
 from .firewall import (attached_groups, rules_for_instance, parse_port, fmt_rule,
                        is_ssh_protecting, add_port, enable_ping, disable_ping, remove_rule, public_ping_enabled)
 from .ssh_password import ssh_fingerprint, change_root_password
-from .regions import format_region, region_button_rows
+from .regions import format_region, region_button_rows, inactive_region_rows
+from .pricing import quote_on_demand, display_quote
 
 load_dotenv()
 TOKEN = os.getenv('TELEGRAM_BOT_TOKEN','').strip()
@@ -134,6 +135,9 @@ async def show_region_page(update,context,kind,page):
     account=STORE.account(context.user_data['account_id'])
     regions=context.user_data.get('region_choices',[])
     rows,total_pages=region_button_rows(regions,kind,page)
+    inactive=context.user_data.get('region_inactive',[])
+    if inactive:
+        rows.insert(-1, [('🔒 سایر لوکیشن‌ها (نیازمند فعال‌سازی) · '+str(len(inactive)), f'{kind}:inactive:0')])
     purpose='ساخت سرور جدید' if kind=='new' else 'مشاهده سرورها'
     await show(update,f'🌍 {purpose} — اکانت {account["alias"]}\n'
                 f'کشور و لوکیشن را انتخاب کن (صفحه {page+1} از {total_pages}):',keyboard(rows))
@@ -143,11 +147,12 @@ async def region_menu(update,context,kind,account_id):
     try:
         account=STORE.account(account_id)
         session=await run_io(session_for_account,account)
-        regions=await run_io(available_regions,session)
+        regions,inactive=await run_io(region_catalog,session)
         if not regions: raise ValueError('No enabled regions were returned by AWS')
         context.user_data['account_id']=account_id
         context.user_data['region_kind']=kind
         context.user_data['region_choices']=regions
+        context.user_data['region_inactive']=inactive
         await show_region_page(update,context,kind,0)
     except Exception as exc:
         await show(update,'❌ '+error_message(exc),home_buttons())
@@ -155,7 +160,7 @@ async def region_menu(update,context,kind,account_id):
 
 async def list_region(update,context,region):
     account_id=context.user_data.get('account_id')
-    if not account_id or region not in REGIONS: raise ValueError('Select an account and valid region first')
+    if not account_id or region not in context.user_data.get('region_choices',[]): raise ValueError('Select an enabled region first')
     account=STORE.account(account_id)
     session=await run_io(session_for_account,account)
     items=await run_io(list_instances,session,region)
@@ -197,7 +202,7 @@ def summarize(w):
     return (f"☁️ پیش‌نمایش ساخت:\nنام: {w['name']}\nAccount ID: {w['account_id']}\n"
             f"Region: {format_region(w['region'])}\nUbuntu: {w['release']}\nType: {w['instance_type']}\n"
             f"Disk: {w['disk']} GiB (gp3 encrypted)\nSSH: {w['access']} / {w['ssh_cidr']}\n"
-            f"{danger}\nهزینه EC2، دیسک و IPv4 عمومی طبق تعرفه AWS محاسبه می‌شود.\n"
+            f"{danger}\n\n{display_quote(w.get('quote'))}\n\n"
             'با تأیید، منابع پولی AWS ایجاد می‌شوند.')
 
 
@@ -311,9 +316,18 @@ async def accept_text(update,context):
         if pending=='instance_name':
             if not re.fullmatch(r'[A-Za-z0-9_-]{3,40}',raw):
                 raise ValueError('Server name must contain 3–40 Latin letters, digits, _ or -')
-            context.user_data['wizard']['name']=raw
+            w=context.user_data['wizard']
+            w['name']=raw
             context.user_data['pending']=None
-            return await show(update,summarize(context.user_data['wizard']),keyboard([
+            await show(update,'💵 در حال دریافت قیمت رسمی AWS برای این لوکیشن و مشخصات...')
+            try:
+                acct=STORE.account(w['account_id'])
+                sess=await run_io(session_for_account,acct)
+                w['quote']=await run_io(quote_on_demand,sess,w['region'],w['instance_type'],w['disk'])
+            except Exception as exc:
+                log.warning('Pricing API unavailable: %s', type(exc).__name__)
+                w['quote']=None
+            return await show(update,summarize(w),keyboard([
                 [('✅ تأیید ساخت', 'new:go')], [('❌ انصراف','home')]]))
     except Exception as exc:
         if pending in ('key_secret','role_arn','pw_current'):
@@ -464,9 +478,26 @@ async def on_click(update:Update,context:ContextTypes.DEFAULT_TYPE):
         if data.startswith(('new:page:', 'ls:page:')):
             kind,_,page=data.split(':')
             return await show_region_page(update,context,kind,int(page))
+        if data.startswith(('new:inactive:', 'ls:inactive:')):
+            kind,_,page=data.split(':')
+            if kind!=context.user_data.get('region_kind'):
+                raise ValueError('انتخاب لوکیشن منقضی شده است')
+            rows,total=inactive_region_rows(context.user_data.get('region_inactive',[]),kind,int(page))
+            return await show(update,f'🔒 لوکیشن‌های غیرفعال در اکانت تو — صفحه {int(page)+1}/{total}\n'
+                              'برای استفاده باید از AWS Console → Account → AWS Regions فعال شوند.\n'
+                              'برای این کار دسترسی مدیریتی اکانت لازم است؛ ربات آن‌ها را خودکار فعال نمی‌کند.',keyboard(rows))
+        if data.startswith(('new:locked:', 'ls:locked:')):
+            kind,_,region=data.split(':')
+            if kind!=context.user_data.get('region_kind') or region not in context.user_data.get('region_inactive',[]):
+                raise ValueError('لوکیشن نامعتبر است')
+            return await show(update,f'🔒 {format_region(region)} هنوز در اکانت AWS فعال نیست.\n'
+                              'در AWS Console روی نام اکانت → Account → AWS Regions برو و این لوکیشن را Enable کن.\n'
+                              'بعد از تکمیل فعال‌سازی دوباره منوی لوکیشن ربات را باز کن.',
+                              keyboard([[('⬅️ لوکیشن‌های غیرفعال',f'{kind}:inactive:0')],
+                                        [('🏠 منو','home')]]))
         if data.startswith('new:r:'):
             region=data.split(':')[2]
-            if region not in REGIONS or region not in context.user_data.get('region_choices',[]):
+            if not valid_region_id(region) or region not in context.user_data.get('region_choices',[]):
                 raise ValueError('لوکیشن معتبر نیست؛ دوباره اکانت را انتخاب کن.')
             context.user_data['wizard']['region']=region
             return await show(update,f'🐧 نسخه Ubuntu در {format_region(region)}:',keyboard([
@@ -474,9 +505,9 @@ async def on_click(update:Update,context:ContextTypes.DEFAULT_TYPE):
                 [('Ubuntu 26.04 LTS','new:u:26.04')],[('انصراف','home')]]))
         if data.startswith('new:u:'):
             context.user_data['wizard']['release']=data.split(':')[2]
-            return await show(update,'⚙️ نوع EC2 (CPU/RAM) را انتخاب کن:',keyboard([
-                [(f'{t} | {TYPE_SPECS[t.split(".")[1]]}',f'new:t:{t}') for t in TYPES[i:i+2]] for i in range(0,len(TYPES),2)] +
-                [[('انصراف','home')]]))
+            return await show(update,'⚙️ مشخصات CPU و RAM را انتخاب کن\nهر گزینه در یک سطر:',keyboard(
+                [[(f'🖥 {t} · {TYPE_SPECS[t.split(".")[1]]}',f'new:t:{t}')] for t in TYPES] +
+                [[('❌ انصراف','home')]]))
         if data.startswith('new:t:'):
             choice=data.split(':')[2]
             if choice not in TYPES:raise ValueError('Invalid instance type')
@@ -510,7 +541,8 @@ async def on_click(update:Update,context:ContextTypes.DEFAULT_TYPE):
                                 w['instance_type'],w['disk'],w['ssh_cidr'],w['access'])
             STORE.log(w['account_id'],'create',w['region'],result['id'])
             output=(f"✅ سرور ایجاد شد.\nAccount: {account['alias']}\nInstance ID: {result['id']}\n"
-                    f"Region: {format_region(w['region'])}\nUser: ubuntu\n"
+                    f"Region: {format_region(w['region'])}\nUser: ubuntu\n\n"
+                    f"{display_quote(w.get('quote'))}\n\n"
                     'IP عمومی ممکن است چند لحظه بعد اختصاص داده شود. از «سرورها» بررسی کن.\n'
                     'ورود SSH فقط پس از تکمیل cloud-init آماده خواهد بود.')
             await update.effective_message.reply_text(output,reply_markup=home_buttons())
