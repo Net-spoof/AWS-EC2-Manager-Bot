@@ -203,3 +203,22 @@ by name; manual AMI ID is the escape hatch. Version availability varies by Regio
 Groups are managed by the account; there is no inbound port on the bot VPS.
 The bot's firewall rule-removal protection includes both management ports.
 **Testing:** unit tests use stubbed AWS sessions, not a billable EC2 account.
+
+### v1.5 — Enable opt-in Regions from Telegram
+
+The inactive Region picker now provides an owner-only **Enable Region** action with two confirmation screens. It uses the **AWS Account Management** API `GetRegionOptStatus` and `EnableRegion` against the credentials of the selected AWS account; **no root credentials** and no manual account ID are required. The operation does not create any EC2 instances. The bot explicitly displays `DISABLED`, `ENABLING`, `ENABLED` or `DISABLING` and has a **Refresh status** button; when enabled, select the Region again from the refreshed Region menu. The request can take minutes to hours. No automatic disabling of Regions is implemented.
+
+If your IAM user/role uses the example policy, **update the existing IAM policy** from `deploy/iam-ec2-manager-policy.json`, or attach the following inline policy to the same IAM principal:
+
+```json
+{
+  "Version":"2012-10-17",
+  "Statement":[{
+    "Effect":"Allow",
+    "Action":["account:GetRegionOptStatus","account:EnableRegion"],
+    "Resource":"*"
+  }]
+}
+```
+
+Some AWS Organizations may restrict Region opt-in via service control policies or account restrictions; ordinary IAM permissions cannot override such restrictions. For linked AWS accounts, the bot's IAM identity in **each selected account** needs the permissions. Never use `AdministratorAccess` just for this feature. After `git pull --ff-only`, run `docker compose up -d --build` on the bot host. Avoid `down -v` (database deletion).

@@ -29,6 +29,7 @@ from .firewall import (attached_groups, rules_for_instance, parse_port, fmt_rule
 from .ssh_password import ssh_fingerprint, change_root_password
 from .regions import format_region, region_button_rows, inactive_region_rows
 from .pricing import quote_on_demand, display_quote
+from .region_activation import get_opt_status, enable_opt_region
 from .os_catalog import OS_CATALOG, AMI_ID, os_label, os_login, is_windows, supports_password, resolve_image
 
 load_dotenv()
@@ -157,6 +158,54 @@ async def region_menu(update,context,kind,account_id):
         await show_region_page(update,context,kind,0)
     except Exception as exc:
         await show(update,'❌ '+error_message(exc),home_buttons())
+
+
+def region_enable_state(context):
+    state=context.user_data.get('region_activation')
+    if not isinstance(state,dict):
+        raise ValueError('درخواست منقضی شده؛ لوکیشن را دوباره انتخاب کن.')
+    if state.get('kind') != context.user_data.get('region_kind'):
+        raise ValueError('ابتدا دوباره اکانت را انتخاب کن.')
+    if state.get('account_id') != context.user_data.get('account_id'):
+        raise ValueError('اکانت تغییر کرده است؛ دوباره شروع کن.')
+    if state.get('region') not in context.user_data.get('region_inactive',[]):
+        raise ValueError('لوکیشن در فهرست غیرفعال موجود نیست؛ صفحه را دوباره باز کن.')
+    return state
+
+
+async def show_activation_status(update,context):
+    state=region_enable_state(context)
+    account=STORE.account(state['account_id'])
+    session=await run_io(session_for_account,account)
+    try:
+        status=await run_io(get_opt_status,session,state['region'])
+    except ClientError as exc:
+        if exc.response.get('Error',{}).get('Code') in ('AccessDeniedException','AccessDenied','UnauthorizedOperation'):
+            return await show(update,'❌ مجوز بررسی وضعیت ریجن وجود ندارد. به IAM همین اکانت مجوز account:GetRegionOptStatus بده.\\n'
+                              'برای فعال‌سازی هم account:EnableRegion لازم است.',home_buttons())
+        raise
+    label=format_region(state['region'])
+    back=[('⬅️ لیست لوکیشن‌های غیرفعال', f"{state['kind']}:inactive:0")]
+    if status == 'DISABLED':
+        state['phase']='select'
+        return await show(update,f'🔒 {label}\\nوضعیت AWS: DISABLED\\n\\n'
+                          'می‌توانی این لوکیشن را از همین ربات فعال کنی. خود فعال‌سازی رایگان است، '
+                          'اما ایجاد سرور در آن هزینه دارد.\\n'
+                          '⚠️ ممکن است فعال‌سازی چند دقیقه تا چند ساعت طول بکشد.',
+                          keyboard([[('✅ درخواست فعال‌سازی لوکیشن','region:enable:ask')],
+                                    [('🔄 بررسی مجدد وضعیت','region:status')],back,[('🏠 منو','home')]]))
+    if status in ('ENABLED','ENABLED_BY_DEFAULT'):
+        state['phase']='enabled'
+        return await show(update,f'✅ {label}\\nوضعیت AWS: {status}\\n'
+                          'لوکیشن فعال شده است؛ فهرست لوکیشن‌ها را تازه‌سازی کن.',
+                          keyboard([[('🌍 بازگشت به انتخاب لوکیشن', f"{state['kind']}:a:{state['account_id']}")],
+                                    [('🏠 منو','home')]]))
+    state['phase']='pending'
+    message=('⏳ درخواست فعال‌سازی در حال انجام است؛ تا پایان آن امکان ساخت سرور نیست.'
+             if status=='ENABLING' else
+             '⏳ غیرفعال‌سازی در جریان است؛ صبر کن تا وضعیت AWS به DISABLED تغییر کند.')
+    return await show(update,f'🌍 {label}\\nوضعیت AWS: {status}\\n{message}',
+                      keyboard([[('🔄 بررسی وضعیت فعال‌سازی','region:status')],back,[('🏠 منو','home')]]))
 
 
 async def list_region(update,context,region):
@@ -515,18 +564,50 @@ async def on_click(update:Update,context:ContextTypes.DEFAULT_TYPE):
             if kind!=context.user_data.get('region_kind'):
                 raise ValueError('انتخاب لوکیشن منقضی شده است')
             rows,total=inactive_region_rows(context.user_data.get('region_inactive',[]),kind,int(page))
-            return await show(update,f'🔒 لوکیشن‌های غیرفعال در اکانت تو — صفحه {int(page)+1}/{total}\n'
-                              'برای استفاده باید از AWS Console → Account → AWS Regions فعال شوند.\n'
-                              'برای این کار دسترسی مدیریتی اکانت لازم است؛ ربات آن‌ها را خودکار فعال نمی‌کند.',keyboard(rows))
+            return await show(update,f'🔒 لوکیشن‌های غیرفعال — صفحه {int(page)+1}/{total}\\n'
+                              'یک لوکیشن را بزن تا وضعیتش را بررسی و از همین ربات فعال کنی.\\n'
+                              'برای این کار مجوزهای account:GetRegionOptStatus و account:EnableRegion لازم‌اند.',keyboard(rows))
         if data.startswith(('new:locked:', 'ls:locked:')):
             kind,_,region=data.split(':')
             if kind!=context.user_data.get('region_kind') or region not in context.user_data.get('region_inactive',[]):
                 raise ValueError('لوکیشن نامعتبر است')
-            return await show(update,f'🔒 {format_region(region)} هنوز در اکانت AWS فعال نیست.\n'
-                              'در AWS Console روی نام اکانت → Account → AWS Regions برو و این لوکیشن را Enable کن.\n'
-                              'بعد از تکمیل فعال‌سازی دوباره منوی لوکیشن ربات را باز کن.',
-                              keyboard([[('⬅️ لوکیشن‌های غیرفعال',f'{kind}:inactive:0')],
-                                        [('🏠 منو','home')]]))
+            context.user_data['region_activation']={
+                'kind':kind, 'region':region,'account_id':context.user_data['account_id'],'phase':'select'
+            }
+            return await show_activation_status(update,context)
+        if data=='region:status':
+            return await show_activation_status(update,context)
+        if data=='region:enable:ask':
+            state=region_enable_state(context)
+            if state.get('phase')!='select':
+                return await show_activation_status(update,context)
+            account=STORE.account(state['account_id'])
+            sess=await run_io(session_for_account,account)
+            latest=await run_io(get_opt_status,sess,state['region'])
+            if latest!='DISABLED':
+                return await show_activation_status(update,context)
+            state['phase']='confirm'
+            return await show(update,f"⚠️ تأیید نهایی فعال‌سازی {format_region(state['region'])}\\n"
+                              f"اکانت: {account['alias']} ({account['aws_account_id']})\\n\\n"
+                              'AWS تنظیمات اکانت را برای این منطقه آماده می‌کند؛ ممکن است چند ساعت طول بکشد. '
+                              'خود فعال‌سازی هزینه ندارد و هیچ EC2 ساخته نمی‌شود.',
+                              keyboard([[('✅ بله، فعال‌سازی در AWS','region:enable:go')],
+                                        [('❌ انصراف','region:status')]]))
+        if data=='region:enable:go':
+            state=region_enable_state(context)
+            if state.get('phase')!='confirm':
+                raise ValueError('درخواست معتبر نیست؛ دوباره از بخش لوکیشن شروع کن.')
+            state['phase']='requested'  # consume approval before any AWS write
+            try:
+                account=STORE.account(state['account_id'])
+                sess=await run_io(session_for_account,account)
+                status=await run_io(enable_opt_region,sess,state['region'])
+            except Exception:
+                state['phase']='select'
+                raise
+            if status=='ENABLING':
+                STORE.log(state['account_id'],'region-enable',state['region'],state['region'])
+            return await show_activation_status(update,context)
         if data.startswith('new:r:'):
             region=data.split(':')[2]
             if not valid_region_id(region) or region not in context.user_data.get('region_choices',[]):

@@ -63,6 +63,15 @@
       "Effect": "Allow",
       "Action": "pricing:GetProducts",
       "Resource": "*"
+    },
+    {
+      "Sid": "OptInRegionEnablement",
+      "Effect": "Allow",
+      "Action": [
+        "account:GetRegionOptStatus",
+        "account:EnableRegion"
+      ],
+      "Resource": "*"
     }
   ]
 }
