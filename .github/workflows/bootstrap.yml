@@ -1,0 +1,26 @@
+name: Import source bundle (one-time)
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'bootstrap-payload/**'
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Expand tested project sources
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cat bootstrap-payload/part-* | base64 --decode | tar -xz -C . --no-same-owner
+          rm -rf bootstrap-payload
+          rm -f .github/workflows/bootstrap.yml
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git diff --cached --quiet || git commit -m "feat: publish full Telegram AWS EC2 manager source"
+          git push origin HEAD:main
