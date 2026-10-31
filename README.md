@@ -2,7 +2,7 @@
 
 **Private, Persian-language Telegram control plane for multiple AWS accounts.**
 
-A pragmatic owner-only implementation for provisioning Ubuntu EC2 instances and operating existing EC2 servers. Supports multiple IAM key connections encrypted on disk, or AWS cross-account `AssumeRole` connections without transferring account API secrets through Telegram.
+A pragmatic owner-only implementation for provisioning multi-OS EC2 instances and operating existing EC2 servers. Supports multiple IAM key connections encrypted on disk, or AWS cross-account `AssumeRole` connections without transferring account API secrets through Telegram.
 
 > ⚠️ This project is provided as a deployable **initial release**, not a production-certified cloud control plane. It has not been tested against a live AWS account from this environment. AWS resources incur real charges. Start with an account/budget dedicated to testing.
 
@@ -16,7 +16,7 @@ A pragmatic owner-only implementation for provisioning Ubuntu EC2 instances and 
 | Dynamic AWS Region list (enabled/opt-in), Persian flags and pagination | ✅ (v1.3) |
 | On-Demand EC2 hourly and monthly pricing preview + creation receipt | ✅ (v1.3) |
 | Vertically stacked CPU/RAM instance-type buttons | ✅ (v1.3) |
-| EC2 create in default VPC with Ubuntu 22.04 / 24.04 / 26.04 | ✅ |
+| EC2 multi-OS wizard: Ubuntu, Debian, Amazon Linux, Windows Server, RHEL, SLES, Rocky and custom AMIs | ✅ (v1.4) |
 | t3 and t3a x86 instance choices, gp3 encrypted root disk | ✅ |
 | SSH access via auto-generated .pem key or random password | ✅ |
 | Adjustable SSH firewall CIDR | ✅ |
@@ -84,7 +84,7 @@ Note: Some Ubuntu distributions use the official Docker repository rather than a
 ## 4. Telegram workflow
 
 1. `/start` → `اکانت‌ها` → connect via IAM Role or limited IAM Key.
-2. `ساخت سرور` → account → AWS Region → Ubuntu version → instance type → disk size → SSH login mode → allowed public SSH IP/CIDR → server name → confirmation.
+2. `ساخت سرور` → account → AWS Region → OS family → OS version → instance type → disk size → SSH login mode → allowed public SSH IP/CIDR → server name → confirmation.
 3. For password mode, the bot sends a **26-character random password** once in the private chat. EC2 User Data contains only a salted SHA-512 password **hash**, not the plaintext password. Cloud-init may require time to apply the SSH settings and a VM may fail to configure; verify before shutting down old systems. No EC2 key pair is created in password mode.
 4. For SSH key mode, the bot creates an AWS EC2 Key Pair and sends the private `.pem` **only once**. Save it privately and use `chmod 600 key.pem`, then `ssh -i key.pem ubuntu@SERVER_IP`.
 5. `سرورها` → account → region → instance → view status/IP, power actions, CPU metrics or terminate (requires two confirmations).
@@ -160,8 +160,46 @@ The EC2 creation and instance-list Region pickers show the country flag and Pers
 
 ### v1.3 — AWS Region discovery, EC2 price estimate, mobile buttons
 
-- Reads the account's real AWS Region opt-in status using `ec2:DescribeRegions(AllRegions=True)`. Enabled Regions are selectable; disabled Regions appear in a separate menu for guidance. Enable them manually through **AWS Console → Account → AWS Regions**. The bot intentionally does not request Region-activation powers.
-- The CPU/RAM instance type buttons are shown **one per row** for better mobile readability.
-- The confirmation screen and successful EC2 creation message use a **live AWS Price List `GetProducts`** quote for Linux On-Demand **EC2 compute** plus **gp3 EBS storage** and the published **$0.005/hour in-use IPv4 fee**. Monthly projection is based on **730 hours**. **Data transfer, taxes, CPU credits, promotions, free-tier benefits, discounts and extra resources are not included.** When the price API is unavailable, the bot says so; when EBS pricing is missing, it shows an explicitly incomplete subtotal. This projection is not a guaranteed charge.
-- Add `pricing:GetProducts` to the IAM principal if using the custom example policy in `deploy/iam-ec2-manager-policy.json`. If it is denied, launching EC2 remains possible, but pricing displays as unavailable.
-- On the bot VPS run `git pull --ff-only && docker compose up -d --build`. Do not run `docker compose down -v`: it removes the account database.
+- Reads the real AWS account's opt-in status using `ec2:DescribeRegions(AllRegions=True)`, showing enabled Regions for server creation and disabled (opt-in) Regions separately. An opt-in Region must be enabled through **AWS Console → Account → AWS Regions**; this bot does not grant itself permissions to enable AWS Regions.
+- The instance type (CPU/RAM) choices now appear **one per row** to fit Telegram on mobile.
+- Before confirming EC2 creation and after successful creation, attempts a **live AWS Price List GetProducts** quote for Linux On-Demand **EC2 compute**, **gp3 EBS provisioned storage** and the published **$0.005/hr public IPv4** fee. Monthly projection assumes **730 hours**. Other EBS provisions, network traffic, CPU credit surplus for burstable T3, taxes, tier benefits, promotions, Savings Plans, discounts and other services are **not included**. If EC2 pricing is unavailable, the bot states it does not know the price instead of guessing; if gp3 pricing fails, it displays an explicitly incomplete subtotal. AWS Cost Explorer/account billing remains authoritative for charges.
+- For IAM users using the project's managed example policy, update the AWS IAM policy to add `pricing:GetProducts` with Resource `*`. This is only for price lookup; the bot still creates servers when pricing cannot be read.
+- Refresh the Docker container after `git pull` using `docker compose up -d --build`; **do not run `down -v`**, which deletes the encrypted account database.
+
+
+### v1.4 — Multi-OS EC2 creation and advanced AMI support
+
+**Telegram creation wizard:** account → enabled AWS Region → OS family → version →
+CPU/RAM → disk → remote login → allowed source CIDR → name → price preview → confirm.
+Available families include Ubuntu 22.04/24.04/26.04, Debian 12/13, Amazon Linux
+2/2023, Windows Server 2019/2022/2025, RHEL 8/9/10, SUSE SLES 15, Rocky Linux
+8/9, and an **AMI ID** option for any other accessible OS (e.g. AlmaLinux,
+Fedora or AWS Marketplace images). The menu cannot list every Marketplace image
+by name; manual AMI ID is the escape hatch. Version availability varies by Region.
+
+- Ubuntu: existing optional cloud-init SSH password or SSH key. Login: `ubuntu`.
+- Debian: SSH key, default login `admin`.
+- Amazon Linux/RHEL/SUSE: SSH key, default login typically `ec2-user`.
+- Rocky: SSH key, default login generally `rocky` (verify the image documentation).
+- Windows Server: **RDP port 3389** not SSH 22. RSA key pair is created and
+  delivered privately once. Use **AWS EC2 → Instances → Connect → RDP client → Get password**
+  and upload the `.pem` key to decrypt the built-in `Administrator` password.
+  AWS password initialization can take up to 15 minutes. The bot never invents
+  a Windows password or exposes plaintext credentials in EC2 User Data.
+  The wizard requires at least `t3.medium`/4 GiB RAM and offers disks >=40 GiB.
+- Custom AMIs: must be available in the selected Region, x86_64 and EBS-backed.
+  The bot inspects the AMI platform and minimum root-disk size, and uses SSH
+  key/RDP appropriately. For unknown Linux vendors the default username must
+  be checked against the publisher's documentation. AWS Marketplace images
+  may require a subscription and can incur additional licensing charges.
+- Pricing: live AWS Pricing `GetProducts` tries to use Windows/RHEL/SUSE
+  operating-system rates rather than always assuming Linux. If the catalog
+  does not return a trustworthy price, the bot clearly states pricing is
+  unavailable. For custom/unknown AMIs, pricing is never guessed.
+- Add SSM public-parameter read rights for Amazon Linux and Windows Server
+  (the example `deploy/iam-ec2-manager-policy.json` includes them).
+
+**Security:** restrict SSH 22 / RDP 3389 to a trusted source IP. AWS Security
+Groups are managed by the account; there is no inbound port on the bot VPS.
+The bot's firewall rule-removal protection includes both management ports.
+**Testing:** unit tests use stubbed AWS sessions, not a billable EC2 account.

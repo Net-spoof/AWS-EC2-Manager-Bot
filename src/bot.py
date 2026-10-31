@@ -29,6 +29,7 @@ from .firewall import (attached_groups, rules_for_instance, parse_port, fmt_rule
 from .ssh_password import ssh_fingerprint, change_root_password
 from .regions import format_region, region_button_rows, inactive_region_rows
 from .pricing import quote_on_demand, display_quote
+from .os_catalog import OS_CATALOG, AMI_ID, os_label, os_login, is_windows, supports_password, resolve_image
 
 load_dotenv()
 TOKEN = os.getenv('TELEGRAM_BOT_TOKEN','').strip()
@@ -179,7 +180,8 @@ async def details(update,context,account_id,region,instance_id):
     text=(f"🖥 {info['name']}\nID: {info['id']}\nStatus: {info['state']}\n"
           f"Public IP: {info['ip']}\nPrivate IP: {info['private_ip']}\n"
           f"Type: {info['type']}\nRegion: {format_region(region)}\nAZ: {info['zone']}\nSSH key: {info['key_name']}\n"
-          'User: ubuntu (for Ubuntu AMIs)')
+          f"Platform: {info['platform']}\n"
+          'ورود: مطابق نام کاربری ایمیج (برای Windows از RDP استفاده کن)')
     base=f'{account_id}:{region}:{instance_id}'
     await show(update,text,keyboard([
         [('▶️ روشن',f'act:start:{base}'),('⏸ خاموش',f'act:stop:{base}')],
@@ -197,11 +199,24 @@ TYPE_SPECS = {
     'xlarge': '4 vCPU / 16 GiB', '2xlarge': '8 vCPU / 32 GiB'
 }
 
+def os_family_keyboard():
+    return keyboard([[(cfg['label'],f'new:os:{os_id}')] for os_id,cfg in OS_CATALOG.items()] +
+                    [[('❌ انصراف','home')]])
+
+
+def instance_type_keyboard(w):
+    windows=w.get('os_id')=='windows' or w.get('custom_platform')=='windows'
+    choices=[t for t in TYPES if not windows or t.split('.')[1] not in ('micro','small')]
+    return keyboard([[(f'🖥 {t} · {TYPE_SPECS[t.split(".")[1]]}',f'new:t:{t}')] for t in choices] +
+                    [[('❌ انصراف','home')]])
+
+
 def summarize(w):
-    danger='⚠️ SSH برای کل اینترنت باز است!' if w.get('ssh_cidr')=='0.0.0.0/0' else ''
+    danger='⚠️ پورت مدیریت برای کل اینترنت باز است!' if w.get('ssh_cidr')=='0.0.0.0/0' else ''
     return (f"☁️ پیش‌نمایش ساخت:\nنام: {w['name']}\nAccount ID: {w['account_id']}\n"
-            f"Region: {format_region(w['region'])}\nUbuntu: {w['release']}\nType: {w['instance_type']}\n"
-            f"Disk: {w['disk']} GiB (gp3 encrypted)\nSSH: {w['access']} / {w['ssh_cidr']}\n"
+            f"Region: {format_region(w['region'])}\nOS: {os_label(w['os_id'], w['release'])}\n"
+            f"AMI: {w.get('custom_ami','Official / latest by AWS')}\nType: {w['instance_type']}\n"
+            f"Disk: {w['disk']} GiB (gp3 encrypted)\nManagement: {'RDP' if w.get('os_id') == 'windows' or w.get('custom_platform') == 'windows' else 'SSH'} / {w['ssh_cidr']}\n"
             f"{danger}\n\n{display_quote(w.get('quote'))}\n\n"
             'با تأیید، منابع پولی AWS ایجاد می‌شوند.')
 
@@ -308,6 +323,23 @@ async def accept_text(update,context):
             STORE.add_account(context.user_data['alias'],'role',json.dumps(payload),aws_account)
             context.user_data.clear()
             return await show(update,f'✅ IAM Role برای اکانت {aws_account} فعال شد.',home_buttons())
+        if pending=='custom_ami':
+            if not AMI_ID.fullmatch(raw):
+                raise ValueError('شناسه AMI را به‌شکل ami-0123456789abcdef0 وارد کن')
+            w=context.user_data.get('wizard',{})
+            acct=STORE.account(w['account_id'])
+            sess=await run_io(session_for_account,acct)
+            image=await run_io(resolve_image,sess,w['region'],'custom','custom',raw)
+            w['custom_ami']=raw
+            w['custom_platform']=image['platform']
+            w['minimum_disk']=image['minimum_disk']
+            w['release']='custom'
+            context.user_data['pending']=None
+            return await show(update, f"✅ AMI تایید شد: {raw}\n"+
+                f"نوع: {image['platform']}\n"+
+                f"حداقل دیسک: {image['minimum_disk']} GiB\n"+
+                '⚠️ برای AMI سفارشی، روش ورود و هزینه لایسنس ممکن است متفاوت باشد.\n'
+                '⚙️ مشخصات CPU و RAM را انتخاب کن:',instance_type_keyboard(w))
         if pending=='ssh_cidr':
             cidr=validate_cidr(raw)
             context.user_data['wizard']['ssh_cidr']=cidr
@@ -323,7 +355,7 @@ async def accept_text(update,context):
             try:
                 acct=STORE.account(w['account_id'])
                 sess=await run_io(session_for_account,acct)
-                w['quote']=await run_io(quote_on_demand,sess,w['region'],w['instance_type'],w['disk'])
+                w['quote']=await run_io(quote_on_demand,sess,w['region'],w['instance_type'],w['disk'],w['os_id'])
             except Exception as exc:
                 log.warning('Pricing API unavailable: %s', type(exc).__name__)
                 w['quote']=None
@@ -499,38 +531,74 @@ async def on_click(update:Update,context:ContextTypes.DEFAULT_TYPE):
             region=data.split(':')[2]
             if not valid_region_id(region) or region not in context.user_data.get('region_choices',[]):
                 raise ValueError('لوکیشن معتبر نیست؛ دوباره اکانت را انتخاب کن.')
-            context.user_data['wizard']['region']=region
-            return await show(update,f'🐧 نسخه Ubuntu در {format_region(region)}:',keyboard([
-                [('Ubuntu 22.04 LTS','new:u:22.04')], [('Ubuntu 24.04 LTS','new:u:24.04')],
-                [('Ubuntu 26.04 LTS','new:u:26.04')],[('انصراف','home')]]))
-        if data.startswith('new:u:'):
-            context.user_data['wizard']['release']=data.split(':')[2]
-            return await show(update,'⚙️ مشخصات CPU و RAM را انتخاب کن\nهر گزینه در یک سطر:',keyboard(
-                [[(f'🖥 {t} · {TYPE_SPECS[t.split(".")[1]]}',f'new:t:{t}')] for t in TYPES] +
-                [[('❌ انصراف','home')]]))
+            context.user_data['wizard']={'region':region,'account_id':context.user_data['account_id']}
+            return await show(update,f'💿 سیستم‌عامل سرور در {format_region(region)} را انتخاب کن:',os_family_keyboard())
+        if data.startswith('new:os:'):
+            os_id=data.split(':')[2]
+            if os_id not in OS_CATALOG: raise ValueError('سیستم‌عامل نامعتبر است')
+            w=context.user_data.get('wizard',{})
+            if not w.get('region'): raise ValueError('ابتدا لوکیشن را انتخاب کن')
+            w['os_id']=os_id
+            w.pop('custom_ami',None)
+            w.pop('custom_platform',None)
+            if os_id=='custom':
+                context.user_data['pending']='custom_ami'
+                return await show(update,'🛠 شناسه AMI موجود در این Region را وارد کن، مثلاً ami-0123456789abcdef0.\n'
+                                  '⚠️ AMI باید x86_64 و EBS باشد؛ ممکن است حق اشتراک AWS Marketplace لازم داشته باشد.')
+            versions=OS_CATALOG[os_id]['versions']
+            return await show(update, f"💿 نسخه {OS_CATALOG[os_id]['label']} را انتخاب کن:",keyboard(
+                [[(label,f'new:v:{version}')] for version,label in versions.items()] +
+                [[('⬅️ سیستم‌عامل‌ها','new:osmenu')], [('❌ انصراف','home')]]))
+        if data=='new:osmenu':
+            return await show(update,'💿 سیستم‌عامل سرور را انتخاب کن:',os_family_keyboard())
+        if data.startswith('new:v:'):
+            w=context.user_data.get('wizard',{})
+            os_id=w.get('os_id')
+            release=data.split(':')[2]
+            if os_id not in OS_CATALOG or release not in OS_CATALOG[os_id]['versions']:
+                raise ValueError('نسخه سیستم‌عامل معتبر نیست')
+            w['release']=release
+            return await show(update,'⚙️ مشخصات CPU و RAM را انتخاب کن (دکمه‌ها زیر هم هستند):',
+                              instance_type_keyboard(w))
         if data.startswith('new:t:'):
             choice=data.split(':')[2]
             if choice not in TYPES:raise ValueError('Invalid instance type')
-            context.user_data['wizard']['instance_type']=choice
-            return await show(update,'💽 دیسک EBS gp3:',keyboard([
-                [('20 GiB','new:d:20'),('40 GiB','new:d:40')],
-                [('80 GiB','new:d:80'),('160 GiB','new:d:160')],
-                [('انصراف','home')]]))
+            w=context.user_data['wizard']
+            if (w['os_id']=='windows' or w.get('custom_platform')=='windows') and choice.split('.')[1] in ('micro','small'):
+                raise ValueError('برای Windows حداقل ۴ گیگابایت RAM انتخاب کن')
+            w['instance_type']=choice
+            min_disk=w.get('minimum_disk', 40 if w['os_id']=='windows' else 20)
+            choices=[d for d in (20,40,80,160,320,640) if d >= min_disk]
+            return await show(update,f'💽 دیسک EBS gp3 (حداقل {min_disk} GiB):',keyboard(
+                [[(f'{d} GiB',f'new:d:{d}')] for d in choices] + [[('❌ انصراف','home')]]))
         if data.startswith('new:d:'):
             context.user_data['wizard']['disk']=int(data.split(':')[2])
-            return await show(update,'🔐 روش ورود Ubuntu با کاربر ubuntu:\nکلید SSH امنیت بیشتری دارد. رمز عبور در Telegram نمایش داده می‌شود و پس از ساخت مجدد قابل بازیابی نیست.',
-                keyboard([[('🔑 SSH Key (پیشنهادی)','new:m:key')],[('🔒 رمز عبور SSH','new:m:password')],[('انصراف','home')]]))
+            w=context.user_data['wizard']
+            windows=w['os_id']=='windows' or w.get('custom_platform')=='windows'
+            if windows:
+                return await show(update,'🪟 ویندوز: اتصال از راه RDP و حساب Administrator است.\n'
+                    'کلید خصوصی را پس از ساخت دریافت کن؛ رمز Windows را باید از AWS Console → Get Windows Password با همان کلید رمزگشایی کنی.',
+                    keyboard([[('🔑 ایجاد کلید Windows / RDP','new:m:key')],[('❌ انصراف','home')]]))
+            if supports_password(w['os_id']):
+                return await show(update,'🔐 روش ورود SSH را انتخاب کن. کلید SSH امن‌تر است:',
+                    keyboard([[('🔑 کلید SSH (پیشنهادی)','new:m:key')],[('🔒 رمز SSH (فقط Ubuntu)','new:m:password')],[('❌ انصراف','home')]]))
+            return await show(update,'🔐 این ایمیج فقط با کلید SSH راه‌اندازی می‌شود؛ '
+                'کاربر پیش‌فرض را بعد از ساخت در پیام می‌بینی.',
+                keyboard([[('🔑 ایجاد کلید SSH','new:m:key')],[('❌ انصراف','home')]]))
         if data.startswith('new:m:'):
             mode=data.split(':')[2]
-            if mode not in ('key','password'):raise ValueError('Invalid access mode')
+            w=context.user_data.get('wizard',{})
+            if mode not in ('key','password') or (mode=='password' and not supports_password(w.get('os_id'))):
+                raise ValueError('روش ورود برای این سیستم‌عامل پشتیبانی نمی‌شود')
             context.user_data['wizard']['access']=mode
             context.user_data['pending']='ssh_cidr'
-            return await show(update,'🌐 محدوده مجاز SSH را بفرست، مثل `198.51.100.10/32`.\n'
-                'باز کردن برای همه: `0.0.0.0/0` (ریسک حمله و اسکن دارد).\n'
+            port='RDP (3389)' if w.get('os_id')=='windows' or w.get('custom_platform')=='windows' else 'SSH (22)'
+            return await show(update,f'🌐 محدوده IP مجاز {port} را بفرست، مثل 198.51.100.10/32.\n'
+                'باز کردن برای همه: 0.0.0.0/0 (ناامن، مخصوصاً RDP/SSH با رمز).\n'
                 'این مقدار بعداً در AWS Security Groups قابل تغییر است.')
         if data=='new:go':
             w=context.user_data.get('wizard',{})
-            required={'account_id','region','release','instance_type','disk','access','ssh_cidr','name'}
+            required={'account_id','region','os_id','release','instance_type','disk','access','ssh_cidr','name'}
             if not required.issubset(w):raise ValueError('Incomplete creation wizard')
             # Clear immediately to prevent a second click creating another chargeable server.
             context.user_data.clear()
@@ -538,13 +606,20 @@ async def on_click(update:Update,context:ContextTypes.DEFAULT_TYPE):
             account=STORE.account(w['account_id'])
             sess=await run_io(session_for_account,account)
             result=await run_io(create_instance,sess,w['region'],w['name'],w['release'],
-                                w['instance_type'],w['disk'],w['ssh_cidr'],w['access'])
+                                w['instance_type'],w['disk'],w['ssh_cidr'],w['access'],
+                                w['os_id'],w.get('custom_ami'))
             STORE.log(w['account_id'],'create',w['region'],result['id'])
+            user=result.get('user') or ('Administrator' if result['platform']=='windows' else 'مطابق مستندات AMI')
+            details_msg=(
+                '🪟 اتصال: RDP پورت 3389. پس از دریافت فایل PEM، در AWS Console → EC2 → Instances → Connect → RDP client → Get Password کلید را بارگذاری و رمز Administrator را رمزگشایی کن. ممکن است چند دقیقه زمان ببرد.'
+                if result['platform']=='windows' else
+                f'🔑 اتصال: SSH با کاربر {user}. برای ورود با کلید از ssh -i key.pem {user}@SERVER_IP استفاده کن.'
+            )
             output=(f"✅ سرور ایجاد شد.\nAccount: {account['alias']}\nInstance ID: {result['id']}\n"
-                    f"Region: {format_region(w['region'])}\nUser: ubuntu\n\n"
+                    f"Region: {format_region(w['region'])}\nOS: {os_label(w['os_id'],w['release'])}\n"
+                    f"AMI: {result['ami']}\nUser: {user}\n\n"
                     f"{display_quote(w.get('quote'))}\n\n"
-                    'IP عمومی ممکن است چند لحظه بعد اختصاص داده شود. از «سرورها» بررسی کن.\n'
-                    'ورود SSH فقط پس از تکمیل cloud-init آماده خواهد بود.')
+                    'IP عمومی ممکن است چند لحظه بعد اختصاص داده شود. از «سرورها» بررسی کن.\n'+details_msg)
             await update.effective_message.reply_text(output,reply_markup=home_buttons())
             if result['password']:
                 await update.effective_message.reply_text(f"🔒 رمز SSH (فقط همین بار نمایش داده می‌شود):\n{result['password']}\n"
@@ -552,7 +627,9 @@ async def on_click(update:Update,context:ContextTypes.DEFAULT_TYPE):
             if result['pem']:
                 pem=io.BytesIO(result['pem'].encode());pem.name=result['key_name']+'.pem'
                 await update.effective_message.reply_document(InputFile(pem,filename=pem.name),
-                        caption='🔑 کلید خصوصی SSH؛ فقط یک بار ارسال می‌شود. آن را محرمانه نگه دار و chmod 600 بزن.')
+                        caption=('🔑 کلید خصوصی رمزگشایی Administrator ویندوز؛ برای Get Windows Password در AWS Console لازم است.'
+                                 if result['platform']=='windows' else
+                                 '🔑 کلید خصوصی SSH؛ فقط یک بار ارسال می‌شود. آن را محرمانه نگه دار و chmod 600 بزن.'))
             return
         if data.startswith('ls:r:'):
             return await list_region(update,context,data.split(':')[2])

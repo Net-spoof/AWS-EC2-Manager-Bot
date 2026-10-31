@@ -52,7 +52,7 @@ def is_ssh_protecting(rule):
     protocol = str(rule.get('IpProtocol', '')).lower()
     if protocol == '-1':
         return True
-    return protocol in ('tcp', '6') and int(rule.get('FromPort', -1)) <= 22 <= int(rule.get('ToPort', -1))
+    return protocol in ('tcp', '6') and any(int(rule.get('FromPort', -1)) <= p <= int(rule.get('ToPort', -1)) for p in (22, 3389))
 
 
 def fmt_rule(rule):
@@ -82,8 +82,8 @@ def add_port(session, region, instance_id, group_id, protocol, port_start, port_
     if not (1 <= port_start <= port_end <= 65535):
         raise ValueError('Invalid port range')
     cidr = validate_cidr(cidr)
-    if protocol == 'tcp' and port_start <= 22 <= port_end and cidr == '0.0.0.0/0':
-        raise ValueError('Refusing to expose SSH to everyone; choose a specific /32 source')
+    if protocol == 'tcp' and cidr == '0.0.0.0/0' and any(port_start <= port <= port_end for port in (22,3389)):
+        raise ValueError('Refusing to expose SSH or RDP to everyone; choose a specific /32 source')
     _ec2(session, region).authorize_security_group_ingress(
         GroupId=group_id,
         IpPermissions=[{'IpProtocol': protocol, 'FromPort': port_start, 'ToPort': port_end,

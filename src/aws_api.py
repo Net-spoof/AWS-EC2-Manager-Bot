@@ -13,6 +13,7 @@ from botocore.config import Config
 AWS_CONFIG = Config(connect_timeout=8, read_timeout=25, retries={'max_attempts': 3, 'mode':'standard'})
 UBUNTU = {'22.04': ('jammy', 'ebs-gp2'), '24.04':('noble','ebs-gp3'), '26.04':('resolute','ebs-gp3')}
 TYPES = ('t3.micro','t3.small','t3.medium','t3.large','t3.xlarge','t3.2xlarge','t3a.micro','t3a.small','t3a.medium','t3a.large')
+# Historical list retained only as a compatibility reference, not a launch allowlist.
 REGIONS = ('eu-central-1','eu-central-2','eu-west-1','eu-west-2','eu-west-3','eu-north-1','eu-south-1','eu-south-2',
            'us-east-1','us-east-2','us-west-1','us-west-2','ca-central-1','ap-south-1','ap-south-2',
            'ap-southeast-1','ap-southeast-2','ap-northeast-1','ap-northeast-2','ap-northeast-3','me-central-1','me-south-1',
@@ -23,6 +24,7 @@ REGION_PATTERN = re.compile(r'^[a-z]{2}(?:-[a-z]+)+-[1-9][0-9]*$')
 
 def valid_region_id(region):
     return isinstance(region, str) and bool(REGION_PATTERN.fullmatch(region))
+
 
 
 def valid_alias(text):
@@ -56,7 +58,7 @@ def validate_account(kind, payload):
 
 
 def region_catalog(session):
-    """Use the account's AWS Region opt-in status, not a fixed list."""
+    """Use the account's real AWS Region opt-in status, not a fixed list."""
     result = session.client('ec2', region_name='us-east-1', config=AWS_CONFIG).describe_regions(AllRegions=True)
     enabled, disabled = [], []
     for item in result.get('Regions', []):
@@ -73,6 +75,7 @@ def region_catalog(session):
 
 def available_regions(session):
     return region_catalog(session)[0]
+
 
 def resolve_ubuntu_ami(session, region, release):
     if release not in UBUNTU:
@@ -112,9 +115,16 @@ def make_password(length=26):
     return ''.join(secrets.choice(alphabet) for _ in range(length))
 
 
-def create_instance(session, region, name, release, instance_type, disk_gb, ssh_cidr, access_mode):
-    if not valid_region_id(region) or instance_type not in TYPES or release not in UBUNTU:
-        raise ValueError('Invalid region, instance type or release')
+def create_instance(session, region, name, release, instance_type, disk_gb, ssh_cidr, access_mode, os_id="ubuntu", custom_ami=None):
+    from .os_catalog import OS_CATALOG, resolve_image, is_windows, supports_password
+    if not valid_region_id(region) or instance_type not in TYPES or os_id not in OS_CATALOG:
+        raise ValueError('Invalid region, instance type or OS')
+    if os_id != 'custom' and release not in OS_CATALOG[os_id]['versions']:
+        raise ValueError('Invalid OS release')
+    if access_mode == 'password' and not supports_password(os_id):
+        raise ValueError('ورود با رمز اولیه فقط برای Ubuntu پشتیبانی می‌شود؛ کلید SSH انتخاب کن')
+    if os_id == 'windows' and instance_type in ('t3.micro', 't3.small', 't3a.micro', 't3a.small'):
+        raise ValueError('برای Windows Server حداقل ۴ گیگابایت RAM (t3.medium) انتخاب کن')
     if not (12 <= disk_gb <= 1024):
         raise ValueError('Disk should be between 12 and 1024 GiB')
     cidr = validate_cidr(ssh_cidr)
@@ -122,12 +132,15 @@ def create_instance(session, region, name, release, instance_type, disk_gb, ssh_
         raise ValueError('Invalid login mode')
     ec2 = session.client('ec2',region_name=region,config=AWS_CONFIG)
     vpc, subnet = ensure_default_vpc_subnet(ec2)
-    ami = resolve_ubuntu_ami(session, region, release)
-    image = ec2.describe_images(ImageIds=[ami])['Images'][0]
-    root_device = image.get('RootDeviceName', '/dev/sda1')
-    min_disk = max(12, int(image.get('BlockDeviceMappings',[{}])[0].get('Ebs',{}).get('VolumeSize',8)))
+    image_info = resolve_image(session, region, os_id, release, custom_ami)
+    ami = image_info['image_id']
+    root_device = image_info['root_device']
+    min_disk = image_info['minimum_disk']
     if disk_gb < min_disk:
-        raise ValueError(f'Ubuntu image requires at least {min_disk} GiB')
+        raise ValueError(f'این ایمیج حداقل {min_disk} GiB دیسک نیاز دارد')
+    platform=image_info['platform']
+    if platform=='windows' and access_mode!='key':
+        raise ValueError('Windows Server به کلید خصوصی برای دریافت رمز Administrator نیاز دارد')
     password = make_password() if access_mode == 'password' else None
     security_group = None
     key_name = None
@@ -136,9 +149,11 @@ def create_instance(session, region, name, release, instance_type, disk_gb, ssh_
     try:
         group_name = 'ec2-manager-' + uuid.uuid4().hex[:15]
         security_group = ec2.create_security_group(GroupName=group_name,
-                       Description='SSH access for AWS EC2 Manager Bot',VpcId=vpc)['GroupId']
+                       Description='Managed access for AWS EC2 Manager Bot',VpcId=vpc)['GroupId']
+        port = 3389 if platform == 'windows' else 22
         ec2.authorize_security_group_ingress(GroupId=security_group, IpPermissions=[{
-            'IpProtocol':'tcp','FromPort':22,'ToPort':22,'IpRanges':[{'CidrIp':cidr,'Description':'SSH access'}]}])
+            'IpProtocol':'tcp','FromPort':port,'ToPort':port,
+            'IpRanges':[{'CidrIp':cidr,'Description':'RDP access' if port==3389 else 'SSH access'}]}])
         if access_mode == 'key':
             key_name = 'ec2-manager-' + uuid.uuid4().hex[:15]
             key_material = ec2.create_key_pair(KeyName=key_name,KeyType='rsa',KeyFormat='pem')['KeyMaterial']
@@ -158,7 +173,9 @@ def create_instance(session, region, name, release, instance_type, disk_gb, ssh_
         if password:
             params['UserData'] = cloud_init_password(password)
         instance_id = ec2.run_instances(**params)['Instances'][0]['InstanceId']
-        return {'id':instance_id,'password':password,'pem':key_material,'key_name':key_name,'sg_id':security_group}
+        return {'id':instance_id,'password':password,'pem':key_material,'key_name':key_name,
+                'sg_id':security_group, 'platform':platform, 'user':image_info['user'],
+                'ami':ami, 'os_id':os_id}
     except Exception:
         if instance_id is None:
             if key_name:
@@ -193,7 +210,8 @@ def instance_details(session, region, instance_id):
     return {'id':instance_id,'name':tags.get('Name','Unnamed'),'state':inst['State']['Name'],
             'ip':inst.get('PublicIpAddress','—'),'private_ip':inst.get('PrivateIpAddress','—'),
             'type':inst['InstanceType'],'key_name':inst.get('KeyName','—'),
-            'zone':inst['Placement']['AvailabilityZone'],'vpc':inst.get('VpcId','—')}
+            'zone':inst['Placement']['AvailabilityZone'],'vpc':inst.get('VpcId','—'),
+            'platform':'windows' if inst.get('Platform')=='windows' or 'Windows' in inst.get('PlatformDetails','') else 'linux'}
 
 
 def control_instance(session, region, instance_id, action):
