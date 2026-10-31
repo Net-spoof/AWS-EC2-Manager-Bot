@@ -24,6 +24,9 @@ from .aws_api import (REGIONS, TYPES, available_regions, control_instance, cpu_m
                       instance_details, list_instances, monthly_cost, session_for_account, validate_account,
                       valid_alias, validate_cidr)
 from .storage import Store
+from .firewall import (attached_groups, rules_for_instance, parse_port, fmt_rule,
+                       is_ssh_protecting, add_port, enable_ping, disable_ping, remove_rule, public_ping_enabled)
+from .ssh_password import ssh_fingerprint, change_root_password
 
 load_dotenv()
 TOKEN = os.getenv('TELEGRAM_BOT_TOKEN','').strip()
@@ -82,6 +85,8 @@ def error_message(exc):
         return 'Base AWS credentials not found on the bot host.'
     if isinstance(exc,ValueError):
         return str(exc)[:250]
+    if isinstance(exc, (TimeoutError, ConnectionError, OSError)):
+        return 'SSH connection failed. Check port 22, instance status and bot host network.'
     if isinstance(exc,sqlite3.IntegrityError):
         return 'Account alias already exists.'
     log.warning('AWS operation failed: %s',type(exc).__name__)
@@ -164,6 +169,8 @@ async def details(update,context,account_id,region,instance_id):
     await show(update,text,keyboard([
         [('▶️ روشن',f'act:start:{base}'),('⏸ خاموش',f'act:stop:{base}')],
         [('🔄 ری‌استارت',f'act:reboot:{base}'),('📈 CPU',f'cpu:{base}')],
+        [('🛡 فایروال و Ping',f'fw:open:{base}')],
+        [('🔐 تغییر رمز Root',f'pw:open:{base}')],
         [('🗑 حذف سرور',f'del1:{base}')],
         [('⬅️ بازگشت',f'ls:r:{region}')],
     ]))
@@ -184,16 +191,80 @@ def summarize(w):
             'با تأیید، منابع پولی AWS ایجاد می‌شوند.')
 
 
+
+
+def fw_context(context):
+    state=context.user_data.get('fw')
+    if not state or not all(k in state for k in ('account_id','region','instance_id','group_id')):
+        raise ValueError('Firewall session expired. Open the server again.')
+    return state
+
+
+async def firewall_screen(update,context):
+    w=fw_context(context)
+    account=STORE.account(w['account_id'])
+    sess=await run_io(session_for_account,account)
+    rules=await run_io(rules_for_instance,sess,w['region'],w['instance_id'],w['group_id'])
+    ping=public_ping_enabled(rules)
+    lines=[f"🛡 فایروال EC2 / {w['instance_id']}",f"Security Group: {w['group_id']}",
+           f"Ping عمومی: {'✅ فعال' if ping else '❌ غیرفعال'}",
+           'قوانین Security Group ممکن است روی سرورهای دیگر هم تأثیر بگذارند.',
+           'قوانین ورودی:']
+    lines += [f"• {fmt_rule(r)}" for r in rules[:24]] or ['• هیچ قانونی وجود ندارد']
+    if len(rules)>24: lines.append(f'... و {len(rules)-24} قانون دیگر')
+    rows=[[('🔕 غیرفعال کردن Ping','fw:pingoff') if ping else ('✅ فعال کردن Ping','fw:pingon')],
+          [('➕ پورت TCP','fw:add:tcp'),('➕ پورت UDP','fw:add:udp')],
+          [('🔄 بروزرسانی','fw:refresh')]]
+    for r in rules[:20]:
+        if not is_ssh_protecting(r):
+            rid=r.get('SecurityGroupRuleId')
+            if rid:
+                rows.append([(f'🗑 {fmt_rule(r)[:37]}',f'fw:rm:{rid}')])
+    rows.append([('⬅️ سرور',f"i:{w['account_id']}:{w['region']}:{w['instance_id']}")])
+    await show(update,'\n'.join(lines),keyboard(rows))
+
+
+def _ssh_state(context):
+    state=context.user_data.get('ssh_change')
+    if not state or not all(k in state for k in ('account_id','region','instance_id','ip','fingerprint')):
+        raise ValueError('SSH session expired. Start again from server details.')
+    return state
+
 async def accept_text(update,context):
     if not await authorized(update): return
     pending=context.user_data.get('pending')
     if not pending:
         return await update.message.reply_text('از دکمه‌های منو استفاده کن. /start')
     raw=update.message.text.strip()
-    if pending in ('key_id','key_secret','role_arn'):
+    if pending in ('key_id','key_secret','role_arn','pw_current'):
         try: await update.message.delete()
         except TelegramError: pass  # Bot API deletion is best effort; messages are NOT end-to-end encrypted.
     try:
+        if pending=='fw_port':
+            w=fw_context(context)
+            w['port_start'],w['port_end']=parse_port(raw)
+            context.user_data['pending']='fw_cidr'
+            return await show(update,'🌐 محدوده IPv4 مجاز را بفرست، مثل `203.0.113.5/32` یا `0.0.0.0/0`.\nبرای SSH محدوده عمومی مجاز نیست.')
+        if pending=='fw_cidr':
+            w=fw_context(context)
+            w['cidr']=validate_cidr(raw)
+            context.user_data['pending']=None
+            warning='⚠️ این پورت برای کل اینترنت باز خواهد شد.\n' if w['cidr']=='0.0.0.0/0' else ''
+            return await show(update,f"{warning}تأیید باز کردن {w['protocol'].upper()} {w['port_start']}-{w['port_end']} برای {w['cidr']} در {w['group_id']}؟", keyboard([
+                [('✅ تأیید افزودن قانون','fw:go')],[('لغو','fw:refresh')]]))
+        if pending=='pw_current':
+            if not 1 <= len(raw) <= 256:
+                context.user_data.clear()
+                raise ValueError('Current password length is invalid')
+            w=_ssh_state(context)
+            context.user_data.clear()
+            # Credentials live only for this single operation, never in sqlite/logs.
+            await context.bot.send_message(chat_id=update.effective_chat.id,text='🔐 در حال بررسی SSH و تغییر رمز Root...')
+            new_pw=await run_io(change_root_password,w['ip'],raw,w['fingerprint'])
+            STORE.log(w['account_id'],'change_root_password',w['region'],w['instance_id'])
+            return await context.bot.send_message(chat_id=update.effective_chat.id,
+                text=f"✅ رمز Root در سرور {w['instance_id']} تغییر کرد.\nIP: {w['ip']}\nUser: root\nرمز جدید (فقط همین بار):\n{new_pw}\n\n⚠️ این پیام شامل رمز محرمانه است. آن را در جای امن نگه دار و از چت حذف کن.",
+                reply_markup=home_buttons())
         if pending in ('alias_keys','alias_role'):
             if not valid_alias(raw): raise ValueError('نام اکانت باید ۲ تا ۳۲ کاراکتر لاتین، عدد یا _ و - باشد.')
             context.user_data['alias']=raw
@@ -235,7 +306,7 @@ async def accept_text(update,context):
             return await show(update,summarize(context.user_data['wizard']),keyboard([
                 [('✅ تأیید ساخت', 'new:go')], [('❌ انصراف','home')]]))
     except Exception as exc:
-        if pending in ('key_secret','role_arn'):
+        if pending in ('key_secret','role_arn','pw_current'):
             context.user_data.clear()  # avoid holding secrets after failed validation
         await show(update,'❌ '+error_message(exc)+'\n/start برای شروع مجدد')
 
@@ -244,6 +315,94 @@ async def on_click(update:Update,context:ContextTypes.DEFAULT_TYPE):
     if not await authorized(update): return
     data=update.callback_query.data
     try:
+        if data.startswith('fw:open:'):
+            _,_,aid,region,iid=data.split(':')
+            account=STORE.account(int(aid))
+            sess=await run_io(session_for_account,account)
+            groups=await run_io(attached_groups,sess,region,iid)
+            if not groups: raise ValueError('No Security Group attached to this server')
+            context.user_data.clear()
+            context.user_data['fw']={'account_id':int(aid),'region':region,'instance_id':iid}
+            rows=[[(f"{g['name']} · {g['id']}",f"fw:sg:{g['id']}")] for g in groups]
+            rows.append([('⬅️ سرور',f'i:{aid}:{region}:{iid}')])
+            return await show(update,'🛡 Security Group موردنظر را انتخاب کن.\nتغییرات SG ممکن است روی سرورهای دیگری هم اعمال شود.',keyboard(rows))
+        if data.startswith('fw:sg:'):
+            w=context.user_data.get('fw')
+            if not w: raise ValueError('Select the server first')
+            group_id=data.split(':')[2]
+            account=STORE.account(w['account_id']);sess=await run_io(session_for_account,account)
+            groups=await run_io(attached_groups,sess,w['region'],w['instance_id'])
+            if group_id not in [g['id'] for g in groups]: raise ValueError('Group not attached to selected server')
+            w['group_id']=group_id
+            return await firewall_screen(update,context)
+        if data=='fw:refresh':
+            context.user_data['pending']=None
+            return await firewall_screen(update,context)
+        if data=='fw:pingon':
+            w=fw_context(context);account=STORE.account(w['account_id'])
+            sess=await run_io(session_for_account,account)
+            changed=await run_io(enable_ping,sess,w['region'],w['instance_id'],w['group_id'])
+            if changed: STORE.log(w['account_id'],'enable_ping',w['region'],w['group_id'])
+            return await firewall_screen(update,context)
+        if data=='fw:pingoff':
+            w=fw_context(context)
+            return await show(update,'⚠️ درخواست حذف قانون Ping عمومی از Security Group.\nاین تغییر ممکن است چند EC2 را تحت تأثیر قرار دهد.',keyboard([
+                [('✅ تأیید حذف Ping','fw:pingoffgo')],[('لغو','fw:refresh')]]))
+        if data=='fw:pingoffgo':
+            w=fw_context(context);account=STORE.account(w['account_id'])
+            sess=await run_io(session_for_account,account)
+            removed=await run_io(disable_ping,sess,w['region'],w['instance_id'],w['group_id'])
+            if removed: STORE.log(w['account_id'],'disable_ping',w['region'],w['group_id'])
+            return await firewall_screen(update,context)
+        if data.startswith('fw:add:'):
+            proto=data.split(':')[2]
+            if proto not in ('tcp','udp'): raise ValueError('Unsupported protocol')
+            w=fw_context(context)
+            w['protocol']=proto
+            for k in ('port_start','port_end','cidr'):w.pop(k,None)
+            context.user_data['pending']='fw_port'
+            return await show(update,f'🔌 شماره پورت {proto.upper()} را بفرست. مثال: `443` یا `10000-10010`.')
+        if data=='fw:go':
+            w=fw_context(context)
+            if not all(k in w for k in ('protocol','port_start','port_end','cidr')):
+                raise ValueError('Incomplete port wizard')
+            context.user_data['pending']=None
+            account=STORE.account(w['account_id']);sess=await run_io(session_for_account,account)
+            await run_io(add_port,sess,w['region'],w['instance_id'],w['group_id'],w['protocol'],w['port_start'],w['port_end'],w['cidr'])
+            STORE.log(w['account_id'],'add_port',w['region'],w['group_id'])
+            for k in ('protocol','port_start','port_end','cidr'):w.pop(k,None)
+            return await firewall_screen(update,context)
+        if data.startswith('fw:rm:'):
+            rid=data.split(':')[2];w=fw_context(context)
+            account=STORE.account(w['account_id']);sess=await run_io(session_for_account,account)
+            rules=await run_io(rules_for_instance,sess,w['region'],w['instance_id'],w['group_id'])
+            matches=[r for r in rules if r.get('SecurityGroupRuleId')==rid]
+            if not matches or is_ssh_protecting(matches[0]):raise ValueError('Cannot remove this rule')
+            return await show(update,f'⚠️ این قانون حذف شود؟\n{fmt_rule(matches[0])}\n{rid}',keyboard([
+                [('🗑 تأیید حذف قانون',f'fw:rmok:{rid}')],[('لغو','fw:refresh')]]))
+        if data.startswith('fw:rmok:'):
+            rid=data.split(':')[2];w=fw_context(context)
+            account=STORE.account(w['account_id']);sess=await run_io(session_for_account,account)
+            await run_io(remove_rule,sess,w['region'],w['instance_id'],w['group_id'],rid)
+            STORE.log(w['account_id'],'remove_rule',w['region'],rid)
+            return await firewall_screen(update,context)
+        if data.startswith('pw:open:'):
+            _,_,aid,region,iid=data.split(':')
+            account=STORE.account(int(aid));sess=await run_io(session_for_account,account)
+            info=await run_io(instance_details,sess,region,iid)
+            if info['state']!='running': raise ValueError('Server must be running to change password')
+            if info['ip']=='—': raise ValueError('Server has no public IPv4')
+            fingerprint=await run_io(ssh_fingerprint,info['ip'])
+            context.user_data.clear()
+            context.user_data['ssh_change']={'account_id':int(aid),'region':region,'instance_id':iid,
+                                             'ip':info['ip'],'fingerprint':fingerprint}
+            return await show(update,f"🔐 تغییر رمز Root با SSH\nIP: {info['ip']}\nاثر انگشت کلید سرور:\n{fingerprint}\n\nاین اثر انگشت را با خروجی `ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub` روی همان سرور مقایسه کن.\n⚠️ پس از تأیید، رمز فعلی Root از طریق چت خصوصی ربات درخواست می‌شود. Telegram رمزنگاری سرتاسری ندارد.\nربات رمز فعلی را نگهداری نمی‌کند؛ رمز جدید تصادفی می‌سازد.", keyboard([
+                [('✅ اثر انگشت را بررسی و تأیید کردم','pw:trust')],
+                [('انصراف','home')]]))
+        if data=='pw:trust':
+            _ssh_state(context)
+            context.user_data['pending']='pw_current'
+            return await show(update,'🔑 رمز فعلی کاربر Root را بفرست.\nربات تلاش می‌کند پیام حاوی رمز را پس از دریافت حذف کند؛ پیام‌های ربات End-to-End نیستند.')
         if data=='home':
             context.user_data.clear()
             return await show(update,'☁️ منوی اصلی',home_buttons())

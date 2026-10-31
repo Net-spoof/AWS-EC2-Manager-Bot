@@ -19,6 +19,8 @@ A pragmatic owner-only implementation for provisioning Ubuntu EC2 instances and 
 | SSH access via auto-generated .pem key or random password | ✅ |
 | Adjustable SSH firewall CIDR | ✅ |
 | List existing EC2 instances in selected account & Region | ✅ |
+| In-bot EC2 Security Group: ping on/off, TCP/UDP ingress, list/remove rules | ✅ (v1.1) |
+| Rotate an existing EC2 root password over verified SSH | ✅ (v1.1; existing root login required) |
 | Show IP, status, type, start/stop/reboot and CPU average | ✅ |
 | Two-stage terminate confirmation | ✅ |
 | Current-month AWS Cost Explorer estimate and audit log | ✅ |
@@ -128,3 +130,24 @@ python -m compileall -q src
 ## License
 
 No license is granted automatically. Add a license appropriate for your own repository when you are ready.
+
+
+## v1.1 — Firewall & root password rotation
+
+Update an already installed bot without deleting its `.env` or Docker data volume:
+
+```bash
+cd ~/AWS-EC2-Manager-Bot   # replace with your actual repository path
+git pull --ff-only
+sudo docker compose up -d --build
+sudo docker compose logs --tail=50
+```
+
+**Telegram:** `/start` → `سرورها` → AWS account → Region → EC2 instance.
+
+- **🛡 Firewall & Ping:** choose one security group attached to that instance, view inbound rules, toggle ICMP Echo Request (`8/0` from `0.0.0.0/0`), or add TCP/UDP ports/ranges restricted to an IPv4 CIDR. Remove a specific inbound rule using its unique AWS rule ID and an additional confirmation. Deleting rules that cover SSH port 22 (or allow all protocols) is intentionally blocked to prevent lockout. This is an **AWS Security Group** operation, not an Ubuntu UFW operation. Firewall changes can affect *all* instances sharing the group. The UI displays only the first 24 rules and exposes removal controls for the first 20. It does not manage outbound/IPv6 rules or edit existing CIDRs. Creating a port rule does not start a service inside the VM.
+- **🔐 Change root password:** works on an **existing running EC2 instance** only if root password SSH login on port 22 is already enabled, bot host can reach the EC2 public IPv4, and the existing root password is known. First the bot retrieves the SSH host key fingerprint. **Independently verify the fingerprint on the EC2 instance before confirming** (`sudo ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub`; match the algorithm shown in the bot). The bot then asks for the current root password and creates a new 30-character random password, sets it via `chpasswd` over an encrypted verified SSH session, and displays the new password once. The existing password is held only transiently in memory; new and old passwords are **not stored in SQLite or activity logs**. Telegram bot chats are *not* end-to-end encrypted; avoid this feature for high-security production servers. Prefer SSH keys for management where possible. Note that a changed root password does not automatically change the `ubuntu` user's password.
+
+**IAM policy:** Using the project's restricted policy requires new actions `ec2:DescribeSecurityGroupRules` and `ec2:RevokeSecurityGroupIngress` for firewall management. Re-attach the updated [IAM policy](deploy/iam-ec2-manager-policy.json) or update the existing managed policy. Root SSH password rotation uses an outbound SSH session from the bot host and does not itself require additional AWS IAM rights beyond `ec2:DescribeInstances`.
+
+**Security:** Never commit `.env`, IAM secrets, or SSH passwords; if a private root password has appeared in a screenshot or public chat, rotate it. Limit `tcp/22` to trusted source IPs rather than `0.0.0.0/0`. Use the AWS console for emergency recovery if your SSH login stops working.
