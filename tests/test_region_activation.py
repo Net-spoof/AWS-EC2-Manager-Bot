@@ -55,3 +55,14 @@ def test_aws_access_denied_does_not_enable():
     with pytest.raises(PermissionError):
         enable_opt_region(session,'me-central-1')
     client.enable_region.assert_not_called()
+
+
+
+def test_region_access_denied_guidance_mentions_project_scp_not_only_iam():
+    from src.region_activation import REGION_ACCESS_DENIED
+    assert 'AccessDenied' in REGION_ACCESS_DENIED
+    assert 'SCP' in REGION_ACCESS_DENIED
+    assert 'AWS Builder ID' in REGION_ACCESS_DENIED
+    assert 'Advanced Features' in REGION_ACCESS_DENIED
+    assert 'AdministratorAccess' in REGION_ACCESS_DENIED
+    assert '\\n' not in REGION_ACCESS_DENIED

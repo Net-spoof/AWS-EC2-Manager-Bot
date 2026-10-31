@@ -37,3 +37,18 @@ def enable_opt_region(session, region):
         return 'ENABLING'
     # An in-progress opt-in cannot be cancelled or enabled a second time.
     return status
+
+
+
+REGION_ACCESS_DENIED = (
+    '❌ AWS دسترسی بررسی یا فعال‌سازی این لوکیشن را رد کرد (AccessDenied).\\n'
+    'اگر اکانت را از AWS Builder ID / Projects ساخته‌ای، '
+    'در تجربه جدید AWS یک محدودیت سازمانی (SCP) حتی با وجود مجوز IAM، '
+    'account:GetRegionOptStatus و account:EnableRegion را مسدود می‌کند.\\n'
+    'برای استفاده از ریجن‌های دیگر باید Paid Plan و سپس Advanced Features '
+    'را در AWS Settings فعال کنی؛ این کار می‌تواند امکان دریافت '
+    'کردیت‌های اضافه فعالیت‌ها را از بین ببرد.\\n'
+    'اگر اکانت Advanced است، IAM Policy، SCP و Permissions Boundary '
+    'هویت API متصل‌شده را بررسی کن. اضافه‌کردن AdministratorAccess '
+    'محدودیت SCP را دور نمی‌زند.'
+)

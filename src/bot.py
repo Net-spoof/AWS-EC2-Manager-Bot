@@ -32,7 +32,7 @@ from .pricing import quote_on_demand, display_quote, os_from_instance, pricing_e
 from .inventory import list_account_instances, server_page
 from .account_identity import format_identity
 from .regions import REGION_LABELS
-from .region_activation import get_opt_status, enable_opt_region
+from .region_activation import get_opt_status, enable_opt_region, REGION_ACCESS_DENIED
 from .os_catalog import OS_CATALOG, AMI_ID, os_label, os_login, is_windows, supports_password, resolve_image
 
 load_dotenv()
@@ -184,8 +184,7 @@ async def show_activation_status(update,context):
         status=await run_io(get_opt_status,session,state['region'])
     except ClientError as exc:
         if exc.response.get('Error',{}).get('Code') in ('AccessDeniedException','AccessDenied','UnauthorizedOperation'):
-            return await show(update,'❌ مجوز بررسی وضعیت ریجن وجود ندارد. به IAM همین اکانت مجوز account:GetRegionOptStatus بده.\n'
-                              'برای فعال‌سازی هم account:EnableRegion لازم است.',home_buttons())
+            return await show(update,REGION_ACCESS_DENIED,home_buttons())
         raise
     label=format_region(state['region'])
     back=[('⬅️ لیست لوکیشن‌های غیرفعال', f"{state['kind']}:inactive:0")]
@@ -661,7 +660,12 @@ async def on_click(update:Update,context:ContextTypes.DEFAULT_TYPE):
                 return await show_activation_status(update,context)
             account=STORE.account(state['account_id'])
             sess=await run_io(session_for_account,account)
-            latest=await run_io(get_opt_status,sess,state['region'])
+            try:
+                latest=await run_io(get_opt_status,sess,state['region'])
+            except ClientError as exc:
+                if exc.response.get('Error',{}).get('Code') in ('AccessDeniedException','AccessDenied','UnauthorizedOperation'):
+                    return await show(update,REGION_ACCESS_DENIED,home_buttons())
+                raise
             if latest!='DISABLED':
                 return await show_activation_status(update,context)
             state['phase']='confirm'
@@ -680,6 +684,11 @@ async def on_click(update:Update,context:ContextTypes.DEFAULT_TYPE):
                 account=STORE.account(state['account_id'])
                 sess=await run_io(session_for_account,account)
                 status=await run_io(enable_opt_region,sess,state['region'])
+            except ClientError as exc:
+                state['phase']='select'
+                if exc.response.get('Error',{}).get('Code') in ('AccessDeniedException','AccessDenied','UnauthorizedOperation'):
+                    return await show(update,REGION_ACCESS_DENIED,home_buttons())
+                raise
             except Exception:
                 state['phase']='select'
                 raise
