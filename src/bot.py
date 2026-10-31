@@ -27,6 +27,7 @@ from .storage import Store
 from .firewall import (attached_groups, rules_for_instance, parse_port, fmt_rule,
                        is_ssh_protecting, add_port, enable_ping, disable_ping, remove_rule, public_ping_enabled)
 from .ssh_password import ssh_fingerprint, change_root_password
+from .regions import format_region, region_button_rows
 
 load_dotenv()
 TOKEN = os.getenv('TELEGRAM_BOT_TOKEN','').strip()
@@ -127,6 +128,17 @@ async def account_menu(update):
     ]))
 
 
+async def show_region_page(update,context,kind,page):
+    if context.user_data.get('region_kind') != kind:
+        raise ValueError('انتخاب لوکیشن منقضی شده؛ دوباره اکانت را انتخاب کن.')
+    account=STORE.account(context.user_data['account_id'])
+    regions=context.user_data.get('region_choices',[])
+    rows,total_pages=region_button_rows(regions,kind,page)
+    purpose='ساخت سرور جدید' if kind=='new' else 'مشاهده سرورها'
+    await show(update,f'🌍 {purpose} — اکانت {account["alias"]}\n'
+                f'کشور و لوکیشن را انتخاب کن (صفحه {page+1} از {total_pages}):',keyboard(rows))
+
+
 async def region_menu(update,context,kind,account_id):
     try:
         account=STORE.account(account_id)
@@ -134,11 +146,9 @@ async def region_menu(update,context,kind,account_id):
         regions=await run_io(available_regions,session)
         if not regions: raise ValueError('No enabled regions were returned by AWS')
         context.user_data['account_id']=account_id
-        rows=[]
-        for i in range(0,len(regions),2):
-            rows.append([(r,f'{kind}:r:{r}') for r in regions[i:i+2]])
-        rows.append([('⬅️ حساب‌ها','accts')])
-        await show(update,f'🌍 اکانت {account["alias"]}\nیک ریجن را انتخاب کن:',keyboard(rows))
+        context.user_data['region_kind']=kind
+        context.user_data['region_choices']=regions
+        await show_region_page(update,context,kind,0)
     except Exception as exc:
         await show(update,'❌ '+error_message(exc),home_buttons())
 
@@ -151,10 +161,10 @@ async def list_region(update,context,region):
     items=await run_io(list_instances,session,region)
     context.user_data['region']=region
     if not items:
-        return await show(update,f'🖥 سروری در {region} پیدا نشد.',keyboard([[('🌍 ریجن دیگر','ls:a:'+str(account_id))],[('🏠 منو','home')]]))
+        return await show(update,f'🖥 سروری در {format_region(region)} پیدا نشد.',keyboard([[('🌍 ریجن دیگر','ls:a:'+str(account_id))],[('🏠 منو','home')]]))
     rows=[[(f"{x['state']} · {x['name'][:18]} · {x['id']}",f"i:{account_id}:{region}:{x['id']}")] for x in items[:35]]
     rows.append([('🌍 ریجن دیگر',f'ls:a:{account_id}'),('🏠 منو','home')])
-    await show(update,f'🖥 {account["alias"]} / {region} — {len(items)} سرور (حداکثر ۳۵ نمایش):',keyboard(rows))
+    await show(update,f'🖥 {account["alias"]} / {format_region(region)} — {len(items)} سرور (حداکثر ۳۵ نمایش):',keyboard(rows))
 
 
 async def details(update,context,account_id,region,instance_id):
@@ -163,7 +173,7 @@ async def details(update,context,account_id,region,instance_id):
     info=await run_io(instance_details,session,region,instance_id)
     text=(f"🖥 {info['name']}\nID: {info['id']}\nStatus: {info['state']}\n"
           f"Public IP: {info['ip']}\nPrivate IP: {info['private_ip']}\n"
-          f"Type: {info['type']}\nRegion/AZ: {info['zone']}\nSSH key: {info['key_name']}\n"
+          f"Type: {info['type']}\nRegion: {format_region(region)}\nAZ: {info['zone']}\nSSH key: {info['key_name']}\n"
           'User: ubuntu (for Ubuntu AMIs)')
     base=f'{account_id}:{region}:{instance_id}'
     await show(update,text,keyboard([
@@ -185,7 +195,7 @@ TYPE_SPECS = {
 def summarize(w):
     danger='⚠️ SSH برای کل اینترنت باز است!' if w.get('ssh_cidr')=='0.0.0.0/0' else ''
     return (f"☁️ پیش‌نمایش ساخت:\nنام: {w['name']}\nAccount ID: {w['account_id']}\n"
-            f"Region: {w['region']}\nUbuntu: {w['release']}\nType: {w['instance_type']}\n"
+            f"Region: {format_region(w['region'])}\nUbuntu: {w['release']}\nType: {w['instance_type']}\n"
             f"Disk: {w['disk']} GiB (gp3 encrypted)\nSSH: {w['access']} / {w['ssh_cidr']}\n"
             f"{danger}\nهزینه EC2، دیسک و IPv4 عمومی طبق تعرفه AWS محاسبه می‌شود.\n"
             'با تأیید، منابع پولی AWS ایجاد می‌شوند.')
@@ -451,11 +461,15 @@ async def on_click(update:Update,context:ContextTypes.DEFAULT_TYPE):
             info=await run_io(monthly_cost,sess)
             return await show(update,f"💰 هزینه ماه جاری {account['alias']}: {float(info['value']):.2f} {info['currency']}\n"
                                      'Cost Explorer با تأخیر به‌روزرسانی می‌شود؛ هزینه نهایی یا هزینه هر VPS نیست.',home_buttons())
+        if data.startswith(('new:page:', 'ls:page:')):
+            kind,_,page=data.split(':')
+            return await show_region_page(update,context,kind,int(page))
         if data.startswith('new:r:'):
             region=data.split(':')[2]
-            if region not in REGIONS:raise ValueError('Unsupported region')
+            if region not in REGIONS or region not in context.user_data.get('region_choices',[]):
+                raise ValueError('لوکیشن معتبر نیست؛ دوباره اکانت را انتخاب کن.')
             context.user_data['wizard']['region']=region
-            return await show(update,f'🐧 نسخه Ubuntu در {region}:',keyboard([
+            return await show(update,f'🐧 نسخه Ubuntu در {format_region(region)}:',keyboard([
                 [('Ubuntu 22.04 LTS','new:u:22.04')], [('Ubuntu 24.04 LTS','new:u:24.04')],
                 [('Ubuntu 26.04 LTS','new:u:26.04')],[('انصراف','home')]]))
         if data.startswith('new:u:'):
@@ -496,7 +510,7 @@ async def on_click(update:Update,context:ContextTypes.DEFAULT_TYPE):
                                 w['instance_type'],w['disk'],w['ssh_cidr'],w['access'])
             STORE.log(w['account_id'],'create',w['region'],result['id'])
             output=(f"✅ سرور ایجاد شد.\nAccount: {account['alias']}\nInstance ID: {result['id']}\n"
-                    f"Region: {w['region']}\nUser: ubuntu\n"
+                    f"Region: {format_region(w['region'])}\nUser: ubuntu\n"
                     'IP عمومی ممکن است چند لحظه بعد اختصاص داده شود. از «سرورها» بررسی کن.\n'
                     'ورود SSH فقط پس از تکمیل cloud-init آماده خواهد بود.')
             await update.effective_message.reply_text(output,reply_markup=home_buttons())

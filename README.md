@@ -13,7 +13,7 @@ A pragmatic owner-only implementation for provisioning Ubuntu EC2 instances and 
 | Persian Telegram menus, owner-only private chat access | ✅ |
 | Add/remove/test multiple AWS IAM access key accounts | ✅ |
 | Add/remove/test multiple AssumeRole accounts | ✅ |
-| AWS-enabled Region picker | ✅ |
+| AWS-enabled Region picker with Persian country/city names, flags and pagination | ✅ (v1.2) |
 | EC2 create in default VPC with Ubuntu 22.04 / 24.04 / 26.04 | ✅ |
 | t3 and t3a x86 instance choices, gp3 encrypted root disk | ✅ |
 | SSH access via auto-generated .pem key or random password | ✅ |
@@ -151,3 +151,7 @@ sudo docker compose logs --tail=50
 **IAM policy:** Using the project's restricted policy requires new actions `ec2:DescribeSecurityGroupRules` and `ec2:RevokeSecurityGroupIngress` for firewall management. Re-attach the updated [IAM policy](deploy/iam-ec2-manager-policy.json) or update the existing managed policy. Root SSH password rotation uses an outbound SSH session from the bot host and does not itself require additional AWS IAM rights beyond `ec2:DescribeInstances`.
 
 **Security:** Never commit `.env`, IAM secrets, or SSH passwords; if a private root password has appeared in a screenshot or public chat, rotate it. Limit `tcp/22` to trusted source IPs rather than `0.0.0.0/0`. Use the AWS console for emergency recovery if your SSH login stops working.
+
+### v1.2 — Persian regions in Telegram
+
+The EC2 creation and instance-list Region pickers show the country flag and Persian country/geography name, followed by the exact AWS Region ID (e.g. `🇩🇪 آلمان — فرانکفورت (eu-central-1)`). The picker has eight one-column choices per page for readability on mobile. AWS API requests and stored Regions still use original Region IDs. Region options remain limited to the locations enabled for each AWS account. No IAM changes or data migration are needed.
