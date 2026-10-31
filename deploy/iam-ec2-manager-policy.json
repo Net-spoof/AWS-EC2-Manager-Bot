@@ -53,6 +53,12 @@
       "Effect": "Allow",
       "Action": "ce:GetCostAndUsage",
       "Resource": "*"
+    },
+    {
+      "Sid": "OnDemandPublicPriceLookup",
+      "Effect": "Allow",
+      "Action": "pricing:GetProducts",
+      "Resource": "*"
     }
   ]
 }
