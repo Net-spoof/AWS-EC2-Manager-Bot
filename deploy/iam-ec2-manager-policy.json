@@ -13,7 +13,8 @@
         "ec2:DescribeSecurityGroups",
         "ec2:DescribeSecurityGroupRules",
         "ec2:DescribeInstanceTypes",
-        "ec2:DescribeKeyPairs"
+        "ec2:DescribeKeyPairs",
+        "ec2:DescribeVolumes"
       ],
       "Resource": "*"
     },

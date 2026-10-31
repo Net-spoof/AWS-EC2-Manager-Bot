@@ -21,7 +21,8 @@ A pragmatic owner-only implementation for provisioning multi-OS EC2 instances an
 | SSH access via auto-generated .pem key or random password | ✅ |
 | Optional direct root SSH with generated password on fresh Ubuntu, while retaining ubuntu fallback | ✅ (v1.6) |
 | Adjustable SSH firewall CIDR | ✅ |
-| List existing EC2 instances in selected account & Region | ✅ |
+| Unified, paginated EC2 inventory across all enabled Regions after selecting an account | ✅ (v1.7) |
+| On-Demand hourly/monthly estimate in existing server details, with actual EBS metadata | ✅ (v1.7) |
 | In-bot EC2 Security Group: ping on/off, TCP/UDP ingress, list/remove rules | ✅ (v1.1) |
 | Rotate an existing EC2 root password over verified SSH | ✅ (v1.1; existing root login required) |
 | Show IP, status, type, start/stop/reboot and CPU average | ✅ |
@@ -229,3 +230,12 @@ Some AWS Organizations may restrict Region opt-in via service control policies o
 During an Ubuntu EC2 launch, the login-method step now offers **👑 Direct root with password (Ubuntu)** in addition to the existing SSH-key and ubuntu-password options. Selecting it generates a fresh random password, stores **only its salted SHA-512 hash** in cloud-init User Data, and configures `PermitRootLogin yes` and `PasswordAuthentication yes` in a dedicated first-priority sshd drop-in. `cloud-init` sets the password on **both `root` and `ubuntu`** so the standard account remains a fallback; the SSH service is validated and reloaded on first boot. After successful initial setup, run `ssh root@PUBLIC_IP` with the displayed password, without manual `sudo -i`.
 
 **Security:** Direct root SSH by password is riskier than key-based login. The option is explicitly opt-in and available **only for official Ubuntu** images, not Windows, other Linux images or custom AMIs. In particular, **never expose TCP/22 to `0.0.0.0/0` when using this option**; restrict the AWS Security Group to a known management IP/CIDR, and rotate the password after first login. The password is only sent once via a private Telegram bot chat, which is **not end-to-end encrypted**. Root setup can still fail if cloud-init fails; the bot does not verify the guest OS initialization state. Existing EC2 instances are unchanged. No new AWS IAM permissions required.
+
+
+### v1.7 — Unified account inventory and existing-instance price details
+
+Select **Servers → AWS account** to scan all enabled AWS Regions in that account and display EC2 instances immediately, without an extra Region picker. A bounded six-worker scan collects all pages of DescribeInstances, sorts by launch date, and presents ten servers per Telegram page. Each button shows state, name, country and IP; each callback retains its exact AWS Region/instance ID. Refresh rescans AWS. Regions which could not be queried are explicitly reported; a partial result is never claimed complete. A Region scan may take longer on accounts with many enabled Regions or API errors. No changes to any existing EC2 instances.
+
+The server detail view now fetches the instance's AWS billing platform and actual attached EBS volume metadata, then requests an AWS Price List On-Demand quote. Shows EC2 compute/hour, public IPv4/hour if attached, gp3 capacity/month if all attached volumes are gp3, and the projected per-hour and 730-hour-month aggregate. **The quote is a projection, not billed actuals**: tax, traffic, premium gp3 IOPS/throughput, CPU credits, discounts/credits, EBS snapshots and other resources are excluded. For missing \`pricing:GetProducts\` or \`ec2:DescribeVolumes\` permissions, unknown AMIs, unsupported EBS types or AWS API errors, values are intentionally omitted or labeled incomplete rather than guessed. Spot instances show a separate note instead of a misleading On-Demand amount. Stopped instances show a hypothetical always-running estimate, not a current cash bill.
+
+Update the bot IAM user's permissions to include read-only \`ec2:DescribeVolumes\` plus existing \`ec2:DescribeRegions\`, \`ec2:DescribeInstances\`, \`pricing:GetProducts\`. The example IAM policy now includes it. Restart the bot after \`git pull --ff-only && docker compose up -d --build\`; never delete its Docker data volume.

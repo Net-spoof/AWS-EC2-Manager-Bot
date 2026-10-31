@@ -21,14 +21,16 @@ from telegram.error import BadRequest, TelegramError
 from telegram.ext import Application, CallbackQueryHandler, CommandHandler, ContextTypes, MessageHandler, filters
 
 from .aws_api import (REGIONS, TYPES, available_regions, control_instance, cpu_metric, create_instance,
-                      instance_details, list_instances, monthly_cost, region_catalog, session_for_account, validate_account, valid_region_id,
+                      instance_details, instance_volume_info, list_instances, monthly_cost, region_catalog, session_for_account, validate_account, valid_region_id,
                       valid_alias, validate_cidr)
 from .storage import Store
 from .firewall import (attached_groups, rules_for_instance, parse_port, fmt_rule,
                        is_ssh_protecting, add_port, enable_ping, disable_ping, remove_rule, public_ping_enabled)
 from .ssh_password import ssh_fingerprint, change_root_password
 from .regions import format_region, region_button_rows, inactive_region_rows
-from .pricing import quote_on_demand, display_quote
+from .pricing import quote_on_demand, display_quote, os_from_instance
+from .inventory import list_account_instances, server_page
+from .regions import REGION_LABELS
 from .region_activation import get_opt_status, enable_opt_region
 from .os_catalog import OS_CATALOG, AMI_ID, os_label, os_login, is_windows, supports_password, resolve_image
 
@@ -214,6 +216,47 @@ async def show_activation_status(update,context):
                       keyboard([[('🔄 بررسی وضعیت فعال‌سازی','region:status')],back,[('🏠 منو','home')]]))
 
 
+
+async def show_account_servers(update,context,account_id,refresh=False,page=0):
+    """Paginated all-Region EC2 inventory for the selected AWS account."""
+    account=STORE.account(account_id)
+    if refresh or context.user_data.get('servers_account_id')!=account_id or 'servers_items' not in context.user_data:
+        await show(update,'⏳ در حال دریافت سرورها از تمام لوکیشن‌های فعال این اکانت...')
+        session=await run_io(session_for_account,account)
+        items,failed,total=await run_io(list_account_instances,session)
+        context.user_data['servers_account_id']=account_id
+        context.user_data['servers_items']=items
+        context.user_data['servers_failed']=failed
+        context.user_data['servers_regions_count']=total
+        page=0
+    else:
+        items=context.user_data['servers_items']
+        failed=context.user_data.get('servers_failed',[])
+        total=context.user_data.get('servers_regions_count',0)
+    chunk,pages=server_page(items,page)
+    context.user_data['servers_page']=page
+    rows=[]
+    icons={'running':'🟢','stopped':'🔴','pending':'🟡','stopping':'🟠','shutting-down':'🟠'}
+    for inst in chunk:
+        region_label=REGION_LABELS.get(inst['region'],inst['region']).split(' — ')[0]
+        title=f"{icons.get(inst['state'],'⚪')} {inst['name'][:22]} · {region_label} · {inst['ip']}"
+        rows.append([(title,f"i:{account_id}:{inst['region']}:{inst['id']}")])
+    nav=[]
+    if page>0: nav.append(('⬅️ قبلی',f'lsall:p:{page-1}'))
+    if page+1<pages: nav.append(('بعدی ➡️',f'lsall:p:{page+1}'))
+    if nav:rows.append(nav)
+    rows.append([('🔄 بروزرسانی فهرست','lsall:refresh')])
+    rows.append([('🔗 انتخاب اکانت دیگر','ls'),('🏠 منو','home')])
+    note=('⚠️ دریافت سرور از '+str(len(failed))+' ریجن ناموفق بود: '+
+          ', '.join(failed[:5]) + (' ...' if len(failed)>5 else '')+
+          '؛ فهرست ممکن است ناقص باشد.' if failed else '')
+    header=(f"🖥 سرورهای اکانت {account['alias']} — {len(items)} سرور\n"
+            f"🌍 {total} لوکیشن فعال بررسی شد · صفحه {page+1}/{pages}\n")
+    if not items and not failed: header+='در این اکانت سروری پیدا نشد.\n'
+    if not items and failed: header+='سروری از ریجن‌های بررسی‌شده دریافت نشد.\n'
+    await show(update,header+note,keyboard(rows))
+
+
 async def list_region(update,context,region):
     account_id=context.user_data.get('account_id')
     if not account_id or region not in context.user_data.get('region_choices',[]): raise ValueError('Select an enabled region first')
@@ -232,11 +275,36 @@ async def details(update,context,account_id,region,instance_id):
     account=STORE.account(account_id)
     session=await run_io(session_for_account,account)
     info=await run_io(instance_details,session,region,instance_id)
+    disk_label='اطلاعات حجم و نوع دیسک در دسترس نیست'
+    disk_gb=None
+    try:
+        volume=await run_io(instance_volume_info,session,region,info['volume_ids'])
+        disk_label=volume['label']
+        disk_gb=volume['disk_gb']
+    except Exception as exc:
+        log.warning('EBS volume metadata unavailable: %s',type(exc).__name__)
+    os_id=os_from_instance(info.get('platform_details'),info['platform'])
+    if info['spot']:
+        estimate='💵 این سرور Spot است؛ قیمت On-Demand هزینه واقعی Spot نیست. هزینه را در AWS Billing بررسی کن.'
+    elif os_id is None:
+        estimate='💵 تعرفه این AMI/سیستم‌عامل مشخص نیست؛ برای جلوگیری از تخمین اشتباه قیمتی نمایش داده نمی‌شود.'
+    else:
+        try:
+            quote=await run_io(quote_on_demand,session,region,info['type'],disk_gb,os_id,info['ip']!='—')
+            estimate=display_quote(quote)
+        except Exception as exc:
+            log.warning('EC2 detail pricing unavailable: %s',type(exc).__name__)
+            estimate=display_quote(None)
+    if info['state']!='running':
+        estimate+='\nℹ️ این قیمت برآورد حالت روشن بودن است؛ هزینه دیسک در حالت خاموش هم ادامه دارد.'
+
     text=(f"🖥 {info['name']}\nID: {info['id']}\nStatus: {info['state']}\n"
           f"Public IP: {info['ip']}\nPrivate IP: {info['private_ip']}\n"
           f"Type: {info['type']}\nRegion: {format_region(region)}\nAZ: {info['zone']}\nSSH key: {info['key_name']}\n"
           f"Platform: {info['platform']}\n"
-          'ورود: مطابق نام کاربری ایمیج (برای Windows از RDP استفاده کن)')
+          f"Disk: {disk_label}\n"
+          'ورود: مطابق نام کاربری ایمیج (برای Windows از RDP استفاده کن)\n\n'
+          +estimate)
     base=f'{account_id}:{region}:{instance_id}'
     await show(update,text,keyboard([
         [('▶️ روشن',f'act:start:{base}'),('⏸ خاموش',f'act:stop:{base}')],
@@ -244,7 +312,7 @@ async def details(update,context,account_id,region,instance_id):
         [('🛡 فایروال و Ping',f'fw:open:{base}')],
         [('🔐 تغییر رمز Root',f'pw:open:{base}')],
         [('🗑 حذف سرور',f'del1:{base}')],
-        [('⬅️ بازگشت',f'ls:r:{region}')],
+        [('⬅️ بازگشت به سرورها',f'lsall:p:{context.user_data.get("servers_page",0)}')],
     ]))
 
 
@@ -557,7 +625,7 @@ async def on_click(update:Update,context:ContextTypes.DEFAULT_TYPE):
             aid=int(data.split(':')[2]); context.user_data['wizard']={'account_id':aid}
             return await region_menu(update,context,'new',aid)
         if data.startswith('ls:a:'):
-            aid=int(data.split(':')[2]);return await region_menu(update,context,'ls',aid)
+            aid=int(data.split(':')[2]);return await show_account_servers(update,context,aid,refresh=True)
         if data.startswith('bill:a:'):
             aid=int(data.split(':')[2]); account=STORE.account(aid)
             sess=await run_io(session_for_account,account)
@@ -735,8 +803,16 @@ async def on_click(update:Update,context:ContextTypes.DEFAULT_TYPE):
                                  if result['platform']=='windows' else
                                  '🔑 کلید خصوصی SSH؛ فقط یک بار ارسال می‌شود. آن را محرمانه نگه دار و chmod 600 بزن.'))
             return
+        if data.startswith('lsall:p:'):
+            aid=context.user_data.get('servers_account_id')
+            if not aid: raise ValueError('فهرست سرورها منقضی شده؛ مجدداً وارد بخش سرورها شو.')
+            return await show_account_servers(update,context,aid,page=int(data.split(':')[2]))
+        if data=='lsall:refresh':
+            aid=context.user_data.get('servers_account_id')
+            if not aid: raise ValueError('ابتدا اکانت را انتخاب کن.')
+            return await show_account_servers(update,context,aid,refresh=True)
         if data.startswith('ls:r:'):
-            return await list_region(update,context,data.split(':')[2])
+            return await show_account_servers(update,context,context.user_data['account_id'],refresh=True)
         if data.startswith('i:'):
             _,aid,region,iid=data.split(':')
             return await details(update,context,int(aid),region,iid)

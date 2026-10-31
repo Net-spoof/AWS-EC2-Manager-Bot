@@ -230,7 +230,28 @@ def instance_details(session, region, instance_id):
             'ip':inst.get('PublicIpAddress','—'),'private_ip':inst.get('PrivateIpAddress','—'),
             'type':inst['InstanceType'],'key_name':inst.get('KeyName','—'),
             'zone':inst['Placement']['AvailabilityZone'],'vpc':inst.get('VpcId','—'),
-            'platform':'windows' if inst.get('Platform')=='windows' or 'Windows' in inst.get('PlatformDetails','') else 'linux'}
+            'platform':'windows' if inst.get('Platform')=='windows' or 'Windows' in inst.get('PlatformDetails','') else 'linux',
+            'platform_details':inst.get('PlatformDetails',''),
+            'spot':inst.get('InstanceLifecycle')=='spot',
+            'volume_ids':[item['Ebs']['VolumeId'] for item in inst.get('BlockDeviceMappings',[])
+                          if item.get('Ebs',{}).get('VolumeId')]}
+
+
+def instance_volume_info(session, region, volume_ids):
+    """Return the real EBS size when all attached volumes are gp3.
+
+    Unknown or mixed types are deliberately excluded from the priced total.
+    """
+    if not volume_ids:
+        return {'disk_gb':None,'label':'اطلاعات EBS موجود نیست'}
+    ec2=session.client('ec2',region_name=region,config=AWS_CONFIG)
+    volumes=ec2.describe_volumes(VolumeIds=volume_ids).get('Volumes',[])
+    if len(volumes)!=len(volume_ids):
+        return {'disk_gb':None,'label':'اطلاعات بعضی دیسک‌ها ناقص است'}
+    desc=', '.join(f"{vol['Size']} GiB {vol['VolumeType']}" for vol in volumes)
+    gp3=all(vol.get('VolumeType')=='gp3' for vol in volumes)
+    total=sum(vol['Size'] for vol in volumes) if gp3 else None
+    return {'disk_gb':total,'label':desc, 'only_gp3':gp3}
 
 
 def control_instance(session, region, instance_id, action):
