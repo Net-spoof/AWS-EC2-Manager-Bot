@@ -1,0 +1,90 @@
+"""Public AWS On-Demand quotes; never infer an unknown EC2 rate."""
+import json
+from decimal import Decimal, InvalidOperation
+from botocore.config import Config
+
+HOURS_PER_MONTH = Decimal('730')
+PUBLIC_IPV4_USD_HOURLY = Decimal('0.005')
+PRICE_CONFIG = Config(connect_timeout=5, read_timeout=12, retries={'max_attempts': 1})
+
+
+def _find_ondemand_rate(client, filters, unit, usage_suffix=None):
+    response = client.get_products(
+        ServiceCode='AmazonEC2',
+        Filters=[{'Type': 'TERM_MATCH', 'Field': key, 'Value': value} for key, value in filters.items()],
+        FormatVersion='aws_v1', MaxResults=25)
+    rates = []
+    for text in response.get('PriceList', []):
+        product = json.loads(text)
+        attributes = product.get('product', {}).get('attributes', {})
+        usage = attributes.get('usagetype', '')
+        if usage_suffix and not usage.endswith(usage_suffix):
+            continue
+        for term in product.get('terms', {}).get('OnDemand', {}).values():
+            for dimension in term.get('priceDimensions', {}).values():
+                if dimension.get('unit') != unit or str(dimension.get('beginRange', '0')) not in ('0', '0.0'):
+                    continue
+                try:
+                    usd = Decimal(dimension['pricePerUnit']['USD'])
+                except (KeyError, ValueError, InvalidOperation):
+                    continue
+                if usd >= 0:
+                    rates.append(usd)
+    return min(rates) if rates else None
+
+
+def quote_on_demand(session, region, instance_type, disk_gb):
+    """Quote Linux EC2, gp3 EBS, and one public IPv4 (USD).
+
+    No estimates for transfer, burst CPU credits, snapshots, tax or discounts.
+    Incomplete totals are explicitly labeled if EBS price is unavailable.
+    """
+    client = session.client('pricing', region_name='us-east-1', config=PRICE_CONFIG)
+    compute_filters = {
+        'regionCode': region, 'instanceType': instance_type,
+        'operatingSystem': 'Linux', 'tenancy': 'Shared',
+        'preInstalledSw': 'NA', 'capacitystatus': 'Used',
+    }
+    compute = _find_ondemand_rate(client, compute_filters, 'Hrs', 'BoxUsage:' + instance_type)
+    if compute is None:
+        raise ValueError('On-Demand Linux EC2 price not found for this Region/type')
+    storage = None
+    try:
+        storage = _find_ondemand_rate(client, {
+            'regionCode': region, 'volumeApiName': 'gp3',
+        }, 'GB-Mo', 'EBS:VolumeUsage.gp3')
+    except Exception:
+        pass
+    disk_month = storage * Decimal(disk_gb) if storage is not None else None
+    monthly = (compute + PUBLIC_IPV4_USD_HOURLY) * HOURS_PER_MONTH
+    if disk_month is not None:
+        monthly += disk_month
+    return {
+        'compute_hourly': str(compute), 'ipv4_hourly': str(PUBLIC_IPV4_USD_HOURLY),
+        'disk_monthly': str(disk_month) if disk_month is not None else None,
+        'hourly': str(monthly / HOURS_PER_MONTH), 'monthly': str(monthly),
+        'complete': disk_month is not None, 'currency': 'USD',
+    }
+
+
+def display_quote(quote):
+    """Consistent approximate price text before and after launch."""
+    if not quote:
+        return ('💵 قیمت: در حال حاضر قابل استعلام نیست (نیاز به pricing:GetProducts).\n'
+                'برای بررسی تعرفه از AWS Pricing Calculator استفاده کن.\n'
+                '⚠️ ساخت سرور همچنان مشمول هزینه واقعی است.')
+    hourly = Decimal(quote['hourly'])
+    monthly = Decimal(quote['monthly'])
+    disk = quote.get('disk_monthly')
+    dollar = '$'
+    lines = [
+        '💵 قیمت تقریبی On-Demand (USD):',
+        f"• خود EC2: {dollar}{Decimal(quote['compute_hourly']):.5f} در ساعت",
+        f"• IPv4 عمومی: {dollar}{Decimal(quote['ipv4_hourly']):.3f} در ساعت",
+        f'• دیسک gp3: {dollar}{Decimal(disk):.2f} در ماه' if disk is not None
+        else '• دیسک gp3: قیمت نامشخص (در جمع منظور نشده)',
+        f'• برآورد ساعتی: {dollar}{hourly:.5f}' + ('' if quote['complete'] else ' (بدون دیسک)'),
+        f'• برآورد ماهانه (۷۳۰ ساعت): {dollar}{monthly:.2f}' + ('' if quote['complete'] else ' (بدون دیسک)'),
+        '⚠️ ترافیک، مالیات، CPU Credit اضافی، تخفیف‌ها و سایر منابع در این مبلغ نیست.',
+    ]
+    return '\n'.join(lines)
