@@ -27,6 +27,18 @@ REGION_LABELS = {
     'ap-northeast-3': '🇯🇵 ژاپن — اوساکا',
     'me-central-1': '🇦🇪 امارات متحده عربی',
     'me-south-1': '🇧🇭 بحرین',
+    'af-south-1': '🇿🇦 آفریقای جنوبی — کیپ‌تاون',
+    'ap-east-1': '🇭🇰 هنگ‌کنگ',
+    'ap-east-2': '🇹🇼 تایوان — تایپه',
+    'ap-southeast-3': '🇮🇩 اندونزی — جاکارتا',
+    'ap-southeast-4': '🇦🇺 استرالیا — ملبورن',
+    'ap-southeast-5': '🇲🇾 مالزی',
+    'ap-southeast-6': '🇳🇿 نیوزیلند — اوکلند',
+    'ap-southeast-7': '🇹🇭 تایلند — بانکوک',
+    'ca-west-1': '🇨🇦 کانادا — کلگری',
+    'il-central-1': '🇮🇱 اسرائیل — تل‌آویو',
+    'mx-central-1': '🇲🇽 مکزیک — مرکزی',
+    'sa-east-1': '🇧🇷 برزیل — سائوپائولو',
 }
 
 REGIONS_PER_PAGE = 8
@@ -34,7 +46,7 @@ REGIONS_PER_PAGE = 8
 
 def format_region(region):
     """Human-readable region, retaining the exact AWS ID to avoid ambiguity."""
-    return f'{REGION_LABELS.get(region, "🌐 لوکیشن ناشناخته")} ({region})'
+    return f'{REGION_LABELS.get(region, "🌐 لوکیشن جدید AWS")} ({region})'
 
 
 def region_button_rows(regions, kind, page):
@@ -60,3 +72,23 @@ def region_button_rows(regions, kind, page):
         rows.append(navigation)
     rows.append([('🏠 حساب‌ها', 'accts')])
     return rows, total_pages
+
+
+def inactive_region_rows(regions, kind, page):
+    """Render disabled Regions as informative choices only."""
+    if kind not in ('new', 'ls') or page < 0:
+        raise ValueError('Invalid region picker')
+    count = max(1, (len(regions) + REGIONS_PER_PAGE - 1) // REGIONS_PER_PAGE)
+    if page >= count:
+        raise ValueError('Invalid page')
+    chunk = regions[page * REGIONS_PER_PAGE:(page + 1) * REGIONS_PER_PAGE]
+    rows = [[('🔒 ' + format_region(region), f'{kind}:locked:{region}')] for region in chunk]
+    nav = []
+    if page > 0:
+        nav.append(('⬅️ قبلی', f'{kind}:inactive:{page-1}'))
+    if page + 1 < count:
+        nav.append(('بعدی ➡️', f'{kind}:inactive:{page+1}'))
+    if nav:
+        rows.append(nav)
+    rows.append([('⬅️ بازگشت به لوکیشن‌های فعال', f'{kind}:page:0')])
+    return rows, count
