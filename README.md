@@ -13,7 +13,9 @@ A pragmatic owner-only implementation for provisioning Ubuntu EC2 instances and 
 | Persian Telegram menus, owner-only private chat access | ✅ |
 | Add/remove/test multiple AWS IAM access key accounts | ✅ |
 | Add/remove/test multiple AssumeRole accounts | ✅ |
-| AWS-enabled Region picker with Persian country/city names, flags and pagination | ✅ (v1.2) |
+| Dynamic AWS Region list (enabled/opt-in), Persian flags and pagination | ✅ (v1.3) |
+| On-Demand EC2 hourly and monthly pricing preview + creation receipt | ✅ (v1.3) |
+| Vertically stacked CPU/RAM instance-type buttons | ✅ (v1.3) |
 | EC2 create in default VPC with Ubuntu 22.04 / 24.04 / 26.04 | ✅ |
 | t3 and t3a x86 instance choices, gp3 encrypted root disk | ✅ |
 | SSH access via auto-generated .pem key or random password | ✅ |
@@ -155,3 +157,11 @@ sudo docker compose logs --tail=50
 ### v1.2 — Persian regions in Telegram
 
 The EC2 creation and instance-list Region pickers show the country flag and Persian country/geography name, followed by the exact AWS Region ID (e.g. `🇩🇪 آلمان — فرانکفورت (eu-central-1)`). The picker has eight one-column choices per page for readability on mobile. AWS API requests and stored Regions still use original Region IDs. Region options remain limited to the locations enabled for each AWS account. No IAM changes or data migration are needed.
+
+### v1.3 — AWS Region discovery, EC2 price estimate, mobile buttons
+
+- Reads the account's real AWS Region opt-in status using `ec2:DescribeRegions(AllRegions=True)`. Enabled Regions are selectable; disabled Regions appear in a separate menu for guidance. Enable them manually through **AWS Console → Account → AWS Regions**. The bot intentionally does not request Region-activation powers.
+- The CPU/RAM instance type buttons are shown **one per row** for better mobile readability.
+- The confirmation screen and successful EC2 creation message use a **live AWS Price List `GetProducts`** quote for Linux On-Demand **EC2 compute** plus **gp3 EBS storage** and the published **$0.005/hour in-use IPv4 fee**. Monthly projection is based on **730 hours**. **Data transfer, taxes, CPU credits, promotions, free-tier benefits, discounts and extra resources are not included.** When the price API is unavailable, the bot says so; when EBS pricing is missing, it shows an explicitly incomplete subtotal. This projection is not a guaranteed charge.
+- Add `pricing:GetProducts` to the IAM principal if using the custom example policy in `deploy/iam-ec2-manager-policy.json`. If it is denied, launching EC2 remains possible, but pricing displays as unavailable.
+- On the bot VPS run `git pull --ff-only && docker compose up -d --build`. Do not run `docker compose down -v`: it removes the account database.
