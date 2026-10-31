@@ -28,7 +28,7 @@ from .firewall import (attached_groups, rules_for_instance, parse_port, fmt_rule
                        is_ssh_protecting, add_port, enable_ping, disable_ping, remove_rule, public_ping_enabled)
 from .ssh_password import ssh_fingerprint, change_root_password
 from .regions import format_region, region_button_rows, inactive_region_rows
-from .pricing import quote_on_demand, display_quote, os_from_instance
+from .pricing import quote_on_demand, display_quote, os_from_instance, pricing_error_text
 from .inventory import list_account_instances, server_page
 from .regions import REGION_LABELS
 from .region_activation import get_opt_status, enable_opt_region
@@ -294,7 +294,7 @@ async def details(update,context,account_id,region,instance_id):
             estimate=display_quote(quote)
         except Exception as exc:
             log.warning('EC2 detail pricing unavailable: %s',type(exc).__name__)
-            estimate=display_quote(None)
+            estimate=display_quote(None, pricing_error_text(exc))
     if info['state']!='running':
         estimate+='\nℹ️ این قیمت برآورد حالت روشن بودن است؛ هزینه دیسک در حالت خاموش هم ادامه دارد.'
 
@@ -342,7 +342,7 @@ def summarize(w):
             f"Disk: {w['disk']} GiB (gp3 encrypted)\nManagement: {'RDP' if w.get('os_id') == 'windows' or w.get('custom_platform') == 'windows' else 'SSH'} / {w['ssh_cidr']}\n"
             f"SSH user: {'root (password — opt-in)' if w.get('access') == 'root_password' else 'ubuntu (password)' if w.get('access') == 'password' else 'default image user (SSH key)'}\n"
             f"{'⚠️ ورود مستقیم Root با رمز و SSH عمومی خطر امنیتی بالایی دارد. برای پورت 22 محدوده IP مشخص تعیین کن.' if w.get('access') == 'root_password' and w.get('ssh_cidr') == '0.0.0.0/0' else ''}\n"
-            f"{danger}\n\n{display_quote(w.get('quote'))}\n\n"
+            f"{danger}\n\n{display_quote(w.get('quote'), w.get('quote_error'))}\n\n"
             'با تأیید، منابع پولی AWS ایجاد می‌شوند.')
 
 
@@ -484,6 +484,7 @@ async def accept_text(update,context):
             except Exception as exc:
                 log.warning('Pricing API unavailable: %s', type(exc).__name__)
                 w['quote']=None
+                w['quote_error']=pricing_error_text(exc)
             return await show(update,summarize(w),keyboard([
                 [('✅ تأیید ساخت', 'new:go')], [('❌ انصراف','home')]]))
     except Exception as exc:
@@ -788,7 +789,7 @@ async def on_click(update:Update,context:ContextTypes.DEFAULT_TYPE):
             output=(f"✅ سرور ایجاد شد.\nAccount: {account['alias']}\nInstance ID: {result['id']}\n"
                     f"Region: {format_region(w['region'])}\nOS: {os_label(w['os_id'],w['release'])}\n"
                     f"AMI: {result['ami']}\nUser: {user}\n\n"
-                    f"{display_quote(w.get('quote'))}\n\n"
+                    f"{display_quote(w.get('quote'), w.get('quote_error'))}\n\n"
                     'IP عمومی ممکن است چند لحظه بعد اختصاص داده شود. از «سرورها» بررسی کن.\n'+details_msg)
             await update.effective_message.reply_text(output,reply_markup=home_buttons())
             if result['password']:

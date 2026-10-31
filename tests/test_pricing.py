@@ -83,3 +83,58 @@ def test_account_region_opt_in_status_and_new_region():
     rows,pages=inactive_region_rows(disabled,'new',0)
     assert rows[0][0][1]=='new:locked:me-central-1'
     assert pages == 1
+
+
+
+def test_stockholm_quote_uses_region_qualified_usagetype_not_region_code():
+    session, client = fake_session()
+    quote = quote_on_demand(session, 'eu-north-1', 't3.small', 20)
+    assert quote['complete']
+    call1, call2 = client.get_products.call_args_list
+    filters1 = {f['Field']: f['Value'] for f in call1.kwargs['Filters']}
+    filters2 = {f['Field']: f['Value'] for f in call2.kwargs['Filters']}
+    assert filters1['usagetype'] == 'EUN1-BoxUsage:t3.small'
+    assert filters2['usagetype'] == 'EUN1-EBS:VolumeUsage.gp3'
+    assert 'regionCode' not in filters1
+    assert 'regionCode' not in filters2
+
+
+def test_page_two_price_is_processed():
+    from src.pricing import _find_ondemand_rate
+    client=Mock()
+    client.get_products.side_effect=[
+       {'PriceList': [], 'NextToken': 'page2'},
+       {'PriceList': [price_item('EUN1-BoxUsage:t3.small','Hrs','0.0216')]}
+    ]
+    filters={'usagetype':'EUN1-BoxUsage:t3.small'}
+    assert _find_ondemand_rate(client,filters,'Hrs','BoxUsage:t3.small') == Decimal('0.0216')
+    assert client.get_products.call_args_list[1].kwargs['NextToken']=='page2'
+
+
+def test_other_region_rate_is_not_accepted():
+    from src.pricing import _find_ondemand_rate
+    client=Mock()
+    client.get_products.return_value={
+        'PriceList':[price_item('EUC1-BoxUsage:t3.small','Hrs','0.024')]
+    }
+    assert _find_ondemand_rate(
+        client,{'usagetype':'EUN1-BoxUsage:t3.small'},'Hrs','BoxUsage:t3.small'
+    ) is None
+
+
+def test_pricing_denied_gets_specific_help():
+    from botocore.exceptions import ClientError
+    from src.pricing import pricing_error_text, display_quote
+    e=ClientError({'Error':{'Code':'AccessDeniedException','Message':'private server error'}},
+                  'GetProducts')
+    message=display_quote(None,pricing_error_text(e))
+    assert 'pricing:GetProducts' in message
+    assert 'AccessDeniedException' in message
+    assert 'private server error' not in message
+
+
+def test_unknown_region_no_cross_region_rate():
+    from src.pricing import usage_codes
+    with pytest.raises(ValueError,match='منطقه'):
+        usage_codes('eu-unknown-25','BoxUsage:t3.small')
+    assert usage_codes('eu-north-1','BoxUsage:t3.small') == ['EUN1-BoxUsage:t3.small']
