@@ -181,22 +181,28 @@ async def show_activation_status(update,context):
         status=await run_io(get_opt_status,session,state['region'])
     except ClientError as exc:
         if exc.response.get('Error',{}).get('Code') in ('AccessDeniedException','AccessDenied','UnauthorizedOperation'):
-            return await show(update,'❌ مجوز بررسی وضعیت ریجن وجود ندارد. به IAM همین اکانت مجوز account:GetRegionOptStatus بده.\\n'
+            return await show(update,'❌ مجوز بررسی وضعیت ریجن وجود ندارد. به IAM همین اکانت مجوز account:GetRegionOptStatus بده.\n'
                               'برای فعال‌سازی هم account:EnableRegion لازم است.',home_buttons())
         raise
     label=format_region(state['region'])
     back=[('⬅️ لیست لوکیشن‌های غیرفعال', f"{state['kind']}:inactive:0")]
+    if status == 'DISABLED' and state.get('submitted'):
+        state['phase']='pending'
+        return await show(update,f'⏳ {label}\n'
+                          'درخواست فعال‌سازی قبلاً به AWS ارسال شده اما هنوز وضعیت DISABLED گزارش می‌شود.\n'
+                          'چند دقیقه دیگر وضعیت را بررسی کن؛ درخواست تکراری ارسال نخواهد شد.',
+                          keyboard([[('🔄 بررسی وضعیت','region:status')],back,[('🏠 منو','home')]]))
     if status == 'DISABLED':
         state['phase']='select'
-        return await show(update,f'🔒 {label}\\nوضعیت AWS: DISABLED\\n\\n'
+        return await show(update,f'🔒 {label}\nوضعیت AWS: DISABLED\n\n'
                           'می‌توانی این لوکیشن را از همین ربات فعال کنی. خود فعال‌سازی رایگان است، '
-                          'اما ایجاد سرور در آن هزینه دارد.\\n'
+                          'اما ایجاد سرور در آن هزینه دارد.\n'
                           '⚠️ ممکن است فعال‌سازی چند دقیقه تا چند ساعت طول بکشد.',
                           keyboard([[('✅ درخواست فعال‌سازی لوکیشن','region:enable:ask')],
                                     [('🔄 بررسی مجدد وضعیت','region:status')],back,[('🏠 منو','home')]]))
     if status in ('ENABLED','ENABLED_BY_DEFAULT'):
         state['phase']='enabled'
-        return await show(update,f'✅ {label}\\nوضعیت AWS: {status}\\n'
+        return await show(update,f'✅ {label}\nوضعیت AWS: {status}\n'
                           'لوکیشن فعال شده است؛ فهرست لوکیشن‌ها را تازه‌سازی کن.',
                           keyboard([[('🌍 بازگشت به انتخاب لوکیشن', f"{state['kind']}:a:{state['account_id']}")],
                                     [('🏠 منو','home')]]))
@@ -204,7 +210,7 @@ async def show_activation_status(update,context):
     message=('⏳ درخواست فعال‌سازی در حال انجام است؛ تا پایان آن امکان ساخت سرور نیست.'
              if status=='ENABLING' else
              '⏳ غیرفعال‌سازی در جریان است؛ صبر کن تا وضعیت AWS به DISABLED تغییر کند.')
-    return await show(update,f'🌍 {label}\\nوضعیت AWS: {status}\\n{message}',
+    return await show(update,f'🌍 {label}\nوضعیت AWS: {status}\n{message}',
                       keyboard([[('🔄 بررسی وضعیت فعال‌سازی','region:status')],back,[('🏠 منو','home')]]))
 
 
@@ -564,8 +570,8 @@ async def on_click(update:Update,context:ContextTypes.DEFAULT_TYPE):
             if kind!=context.user_data.get('region_kind'):
                 raise ValueError('انتخاب لوکیشن منقضی شده است')
             rows,total=inactive_region_rows(context.user_data.get('region_inactive',[]),kind,int(page))
-            return await show(update,f'🔒 لوکیشن‌های غیرفعال — صفحه {int(page)+1}/{total}\\n'
-                              'یک لوکیشن را بزن تا وضعیتش را بررسی و از همین ربات فعال کنی.\\n'
+            return await show(update,f'🔒 لوکیشن‌های غیرفعال — صفحه {int(page)+1}/{total}\n'
+                              'یک لوکیشن را بزن تا وضعیتش را بررسی و از همین ربات فعال کنی.\n'
                               'برای این کار مجوزهای account:GetRegionOptStatus و account:EnableRegion لازم‌اند.',keyboard(rows))
         if data.startswith(('new:locked:', 'ls:locked:')):
             kind,_,region=data.split(':')
@@ -587,8 +593,8 @@ async def on_click(update:Update,context:ContextTypes.DEFAULT_TYPE):
             if latest!='DISABLED':
                 return await show_activation_status(update,context)
             state['phase']='confirm'
-            return await show(update,f"⚠️ تأیید نهایی فعال‌سازی {format_region(state['region'])}\\n"
-                              f"اکانت: {account['alias']} ({account['aws_account_id']})\\n\\n"
+            return await show(update,f"⚠️ تأیید نهایی فعال‌سازی {format_region(state['region'])}\n"
+                              f"اکانت: {account['alias']} ({account['aws_account_id']})\n\n"
                               'AWS تنظیمات اکانت را برای این منطقه آماده می‌کند؛ ممکن است چند ساعت طول بکشد. '
                               'خود فعال‌سازی هزینه ندارد و هیچ EC2 ساخته نمی‌شود.',
                               keyboard([[('✅ بله، فعال‌سازی در AWS','region:enable:go')],
@@ -606,7 +612,14 @@ async def on_click(update:Update,context:ContextTypes.DEFAULT_TYPE):
                 state['phase']='select'
                 raise
             if status=='ENABLING':
+                state['submitted']=True
                 STORE.log(state['account_id'],'region-enable',state['region'],state['region'])
+                return await show(update,f"✅ درخواست فعال‌سازی {format_region(state['region'])} به AWS ارسال شد.\n"
+                                  '⏳ وضعیت اولیه: ENABLING\n'
+                                  'پس از تکمیل فعال‌سازی می‌توانی سرور بسازی.',
+                                  keyboard([[('🔄 بررسی وضعیت','region:status')],
+                                            [('⬅️ لوکیشن‌های غیرفعال',f"{state['kind']}:inactive:0")],
+                                            [('🏠 منو','home')]]))
             return await show_activation_status(update,context)
         if data.startswith('new:r:'):
             region=data.split(':')[2]
