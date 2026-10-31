@@ -272,6 +272,8 @@ def summarize(w):
             f"Region: {format_region(w['region'])}\nOS: {os_label(w['os_id'], w['release'])}\n"
             f"AMI: {w.get('custom_ami','Official / latest by AWS')}\nType: {w['instance_type']}\n"
             f"Disk: {w['disk']} GiB (gp3 encrypted)\nManagement: {'RDP' if w.get('os_id') == 'windows' or w.get('custom_platform') == 'windows' else 'SSH'} / {w['ssh_cidr']}\n"
+            f"SSH user: {'root (password — opt-in)' if w.get('access') == 'root_password' else 'ubuntu (password)' if w.get('access') == 'password' else 'default image user (SSH key)'}\n"
+            f"{'⚠️ ورود مستقیم Root با رمز و SSH عمومی خطر امنیتی بالایی دارد. برای پورت 22 محدوده IP مشخص تعیین کن.' if w.get('access') == 'root_password' and w.get('ssh_cidr') == '0.0.0.0/0' else ''}\n"
             f"{danger}\n\n{display_quote(w.get('quote'))}\n\n"
             'با تأیید، منابع پولی AWS ایجاد می‌شوند.')
 
@@ -675,14 +677,14 @@ async def on_click(update:Update,context:ContextTypes.DEFAULT_TYPE):
                     keyboard([[('🔑 ایجاد کلید Windows / RDP','new:m:key')],[('❌ انصراف','home')]]))
             if supports_password(w['os_id']):
                 return await show(update,'🔐 روش ورود SSH را انتخاب کن. کلید SSH امن‌تر است:',
-                    keyboard([[('🔑 کلید SSH (پیشنهادی)','new:m:key')],[('🔒 رمز SSH (فقط Ubuntu)','new:m:password')],[('❌ انصراف','home')]]))
+                    keyboard([[('🔑 کلید SSH (پیشنهادی)','new:m:key')],[('🔒 رمز SSH برای ubuntu','new:m:password')],[('👑 ورود مستقیم root با رمز (Ubuntu)','new:m:root_password')],[('❌ انصراف','home')]]))
             return await show(update,'🔐 این ایمیج فقط با کلید SSH راه‌اندازی می‌شود؛ '
                 'کاربر پیش‌فرض را بعد از ساخت در پیام می‌بینی.',
                 keyboard([[('🔑 ایجاد کلید SSH','new:m:key')],[('❌ انصراف','home')]]))
         if data.startswith('new:m:'):
             mode=data.split(':')[2]
             w=context.user_data.get('wizard',{})
-            if mode not in ('key','password') or (mode=='password' and not supports_password(w.get('os_id'))):
+            if mode not in ('key','password','root_password') or (mode in ('password','root_password') and not supports_password(w.get('os_id'))):
                 raise ValueError('روش ورود برای این سیستم‌عامل پشتیبانی نمی‌شود')
             context.user_data['wizard']['access']=mode
             context.user_data['pending']='ssh_cidr'
@@ -707,7 +709,13 @@ async def on_click(update:Update,context:ContextTypes.DEFAULT_TYPE):
             details_msg=(
                 '🪟 اتصال: RDP پورت 3389. پس از دریافت فایل PEM، در AWS Console → EC2 → Instances → Connect → RDP client → Get Password کلید را بارگذاری و رمز Administrator را رمزگشایی کن. ممکن است چند دقیقه زمان ببرد.'
                 if result['platform']=='windows' else
-                f'🔑 اتصال: SSH با کاربر {user}. برای ورود با کلید از ssh -i key.pem {user}@SERVER_IP استفاده کن.'
+                (f'👑 اتصال مستقیم: ssh root@SERVER_IP (با رمز ارائه‌شده).\n'
+                 'اکانت ubuntu با همان رمز برای بازیابی دسترسی فعال است.\n'
+                 'تنظیم Root پس از تکمیل cloud-init قابل استفاده خواهد بود.'
+                 if w.get('access') == 'root_password' else
+                 f'🔑 اتصال: SSH با کاربر {user}. '
+                 + ('برای ورود با رمز از ssh '+user+'@SERVER_IP استفاده کن.' if w.get('access') == 'password'
+                    else f'برای ورود با کلید از ssh -i key.pem {user}@SERVER_IP استفاده کن.'))
             )
             output=(f"✅ سرور ایجاد شد.\nAccount: {account['alias']}\nInstance ID: {result['id']}\n"
                     f"Region: {format_region(w['region'])}\nOS: {os_label(w['os_id'],w['release'])}\n"
@@ -716,8 +724,10 @@ async def on_click(update:Update,context:ContextTypes.DEFAULT_TYPE):
                     'IP عمومی ممکن است چند لحظه بعد اختصاص داده شود. از «سرورها» بررسی کن.\n'+details_msg)
             await update.effective_message.reply_text(output,reply_markup=home_buttons())
             if result['password']:
-                await update.effective_message.reply_text(f"🔒 رمز SSH (فقط همین بار نمایش داده می‌شود):\n{result['password']}\n"
-                    'پس از اتصال، آن را عوض کن. ورود با رمز ممکن است تا تکمیل cloud-init زمان ببرد.')
+                await update.effective_message.reply_text(
+                    f"🔒 رمز SSH {'root و ubuntu' if w.get('access') == 'root_password' else 'ubuntu'} (فقط همین بار):\n{result['password']}\n"
+                    'این رمز را در جای امن ذخیره کن و پیام حاوی رمز را از تلگرام حذف کن. '
+                    'ورود با رمز ممکن است تا تکمیل cloud-init زمان ببرد.')
             if result['pem']:
                 pem=io.BytesIO(result['pem'].encode());pem.name=result['key_name']+'.pem'
                 await update.effective_message.reply_document(InputFile(pem,filename=pem.name),

@@ -102,3 +102,62 @@ def test_failed_launch_cleans_managed_resources():
         create_instance(sess,'eu-central-1','test-vm','24.04','t3.micro',20,'203.0.113.0/24','key')
     ec2.delete_security_group.assert_called_once_with(GroupId='sg-001')
     ec2.delete_key_pair.assert_called_once()
+
+def test_root_login_cloudinit_keeps_only_hash_and_recovery_user():
+    password='SuperStrongRootPassword#2026!'
+    config=cloud_init_password(password, root_login=True)
+    assert password not in config
+    assert config.startswith('#cloud-config\n')
+    assert 'ssh_pwauth: true' in config
+    assert 'disable_root: false' in config
+    assert 'name: root' in config
+    assert 'name: ubuntu' in config
+    assert 'PermitRootLogin yes' in config
+    assert 'PasswordAuthentication yes' in config
+    assert '00-aws-ec2-manager-root.conf' in config
+    assert 'systemctl reload ssh' in config
+    assert config.count('type: hash') == 2
+    assert '$6$rounds=120000$' in config
+
+
+def test_default_cloudinit_does_not_enable_root():
+    config=cloud_init_password('NotARealProductionPassword123!')
+    assert 'PermitRootLogin yes' not in config
+    assert 'name: root' not in config
+    assert 'disable_root: false' not in config
+
+
+def test_root_mode_in_create_instance(monkeypatch):
+    from unittest.mock import Mock
+    from src.aws_api import create_instance
+    ec2=Mock()
+    ssm=Mock()
+    ec2.describe_vpcs.return_value={'Vpcs':[{'VpcId':'vpc-001'}]}
+    ec2.describe_subnets.return_value={'Subnets':[{'SubnetId':'subnet-001','AvailabilityZone':'eu-central-1a'}]}
+    ec2.describe_images.return_value={'Images':[{'RootDeviceName':'/dev/sda1', 'Architecture':'x86_64',
+       'RootDeviceType':'ebs','OwnerId':'099720109477','State':'available','BlockDeviceMappings':[]}]}
+    ec2.create_security_group.return_value={'GroupId':'sg-001'}
+    ec2.run_instances.return_value={'Instances':[{'InstanceId':'i-00000000000000001'}]}
+    ssm.get_parameter.return_value={'Parameter':{'Value':'ami-001'} }
+    sess=Mock()
+    sess.client.side_effect=lambda name,**kwargs: {'ec2':ec2,'ssm':ssm}[name]
+    result=create_instance(sess,'eu-central-1','root-test','24.04','t3.micro',20,'203.0.113.1/32','root_password')
+    assert result['user']=='root'
+    assert result['password'] and len(result['password'])==26
+    assert result['pem'] is None
+    kwargs=ec2.run_instances.call_args.kwargs
+    assert 'KeyName' not in kwargs
+    assert 'PermitRootLogin yes' in kwargs['UserData']
+    assert result['password'] not in kwargs['UserData']
+    assert 'name: ubuntu' in kwargs['UserData']
+    assert 'name: root' in kwargs['UserData']
+    assert kwargs['NetworkInterfaces'][0]['AssociatePublicIpAddress'] is True
+
+
+def test_root_password_rejected_for_non_ubuntu():
+    from unittest.mock import Mock
+    from src.aws_api import create_instance
+    sess=Mock()
+    with pytest.raises(ValueError, match='Ubuntu'):
+        create_instance(sess,'eu-central-1','root-test','12','t3.micro',20,'203.0.113.1/32','root_password','debian')
+    assert not sess.client.called

@@ -98,16 +98,35 @@ def ensure_default_vpc_subnet(ec2):
     return vpc_id, sorted(subnets,key=lambda subnet:subnet['AvailabilityZone'])[0]['SubnetId']
 
 
-def cloud_init_password(password):
-    """Put only a one-time password HASH in userdata, never the plaintext password."""
+def cloud_init_password(password, root_login=False):
+    """Generate Ubuntu user-data with salted password HASH only, never plaintext.
+
+    root_login=True is an explicit opt-in. Both root and ubuntu get the generated
+    password so the standard ubuntu account remains a recovery path.
+    """
     salt = ''.join(secrets.choice(string.ascii_letters + string.digits) for _ in range(16))
     result = subprocess.run(['openssl', 'passwd', '-6', '-stdin', '-salt', f'rounds=120000${salt}'],
                             input=password + '\n', text=True, capture_output=True, check=True)
     hashed = result.stdout.strip()
     if not hashed.startswith('$6$rounds=120000$'):
         raise ValueError('Unable to generate SHA-512 crypt password hash')
-    return ('#cloud-config\nssh_pwauth: true\nchpasswd:\n  expire: false\n  users:\n'
-            f'    - name: ubuntu\n      password: "{hashed}"\n      type: hash\n')
+    config = ('#cloud-config\n'
+              'ssh_pwauth: true\n'
+              + ('disable_root: false\n' if root_login else '')
+              + 'chpasswd:\n  expire: false\n  users:\n'
+              + f'    - name: ubuntu\n      password: "{hashed}"\n      type: hash\n')
+    if root_login:
+        config += (f'    - name: root\n      password: "{hashed}"\n      type: hash\n'
+                   'write_files:\n'
+                   '  - path: /etc/ssh/sshd_config.d/00-aws-ec2-manager-root.conf\n'
+                   '    owner: root:root\n'
+                   '    permissions: "0644"\n'
+                   '    content: |\n'
+                   '      PermitRootLogin yes\n'
+                   '      PasswordAuthentication yes\n'
+                   'runcmd:\n'
+                   '  - [sh, -c, "sshd -t && systemctl reload ssh"]\n')
+    return config
 
 
 def make_password(length=26):
@@ -121,14 +140,14 @@ def create_instance(session, region, name, release, instance_type, disk_gb, ssh_
         raise ValueError('Invalid region, instance type or OS')
     if os_id != 'custom' and release not in OS_CATALOG[os_id]['versions']:
         raise ValueError('Invalid OS release')
-    if access_mode == 'password' and not supports_password(os_id):
+    if access_mode in ('password', 'root_password') and not supports_password(os_id):
         raise ValueError('ورود با رمز اولیه فقط برای Ubuntu پشتیبانی می‌شود؛ کلید SSH انتخاب کن')
     if os_id == 'windows' and instance_type in ('t3.micro', 't3.small', 't3a.micro', 't3a.small'):
         raise ValueError('برای Windows Server حداقل ۴ گیگابایت RAM (t3.medium) انتخاب کن')
     if not (12 <= disk_gb <= 1024):
         raise ValueError('Disk should be between 12 and 1024 GiB')
     cidr = validate_cidr(ssh_cidr)
-    if access_mode not in ('password','key'):
+    if access_mode not in ('password','root_password','key'):
         raise ValueError('Invalid login mode')
     ec2 = session.client('ec2',region_name=region,config=AWS_CONFIG)
     vpc, subnet = ensure_default_vpc_subnet(ec2)
@@ -141,7 +160,7 @@ def create_instance(session, region, name, release, instance_type, disk_gb, ssh_
     platform=image_info['platform']
     if platform=='windows' and access_mode!='key':
         raise ValueError('Windows Server به کلید خصوصی برای دریافت رمز Administrator نیاز دارد')
-    password = make_password() if access_mode == 'password' else None
+    password = make_password() if access_mode in ('password','root_password') else None
     security_group = None
     key_name = None
     key_material = None
@@ -171,10 +190,10 @@ def create_instance(session, region, name, release, instance_type, disk_gb, ssh_
         if key_name:
             params['KeyName'] = key_name
         if password:
-            params['UserData'] = cloud_init_password(password)
+            params['UserData'] = cloud_init_password(password, root_login=access_mode == 'root_password')
         instance_id = ec2.run_instances(**params)['Instances'][0]['InstanceId']
         return {'id':instance_id,'password':password,'pem':key_material,'key_name':key_name,
-                'sg_id':security_group, 'platform':platform, 'user':image_info['user'],
+                'sg_id':security_group, 'platform':platform, 'user':'root' if access_mode == 'root_password' else image_info['user'],
                 'ami':ami, 'os_id':os_id}
     except Exception:
         if instance_id is None:

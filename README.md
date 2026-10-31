@@ -19,6 +19,7 @@ A pragmatic owner-only implementation for provisioning multi-OS EC2 instances an
 | EC2 multi-OS wizard: Ubuntu, Debian, Amazon Linux, Windows Server, RHEL, SLES, Rocky and custom AMIs | ✅ (v1.4) |
 | t3 and t3a x86 instance choices, gp3 encrypted root disk | ✅ |
 | SSH access via auto-generated .pem key or random password | ✅ |
+| Optional direct root SSH with generated password on fresh Ubuntu, while retaining ubuntu fallback | ✅ (v1.6) |
 | Adjustable SSH firewall CIDR | ✅ |
 | List existing EC2 instances in selected account & Region | ✅ |
 | In-bot EC2 Security Group: ping on/off, TCP/UDP ingress, list/remove rules | ✅ (v1.1) |
@@ -222,3 +223,9 @@ If your IAM user/role uses the example policy, **update the existing IAM policy*
 ```
 
 Some AWS Organizations may restrict Region opt-in via service control policies or account restrictions; ordinary IAM permissions cannot override such restrictions. For linked AWS accounts, the bot's IAM identity in **each selected account** needs the permissions. Never use `AdministratorAccess` just for this feature. After `git pull --ff-only`, run `docker compose up -d --build` on the bot host. Avoid `down -v` (database deletion).
+
+### v1.6 — Optional direct root SSH on new Ubuntu instances
+
+During an Ubuntu EC2 launch, the login-method step now offers **👑 Direct root with password (Ubuntu)** in addition to the existing SSH-key and ubuntu-password options. Selecting it generates a fresh random password, stores **only its salted SHA-512 hash** in cloud-init User Data, and configures `PermitRootLogin yes` and `PasswordAuthentication yes` in a dedicated first-priority sshd drop-in. `cloud-init` sets the password on **both `root` and `ubuntu`** so the standard account remains a fallback; the SSH service is validated and reloaded on first boot. After successful initial setup, run `ssh root@PUBLIC_IP` with the displayed password, without manual `sudo -i`.
+
+**Security:** Direct root SSH by password is riskier than key-based login. The option is explicitly opt-in and available **only for official Ubuntu** images, not Windows, other Linux images or custom AMIs. In particular, **never expose TCP/22 to `0.0.0.0/0` when using this option**; restrict the AWS Security Group to a known management IP/CIDR, and rotate the password after first login. The password is only sent once via a private Telegram bot chat, which is **not end-to-end encrypted**. Root setup can still fail if cloud-init fails; the bot does not verify the guest OS initialization state. Existing EC2 instances are unchanged. No new AWS IAM permissions required.
