@@ -1,0 +1,5 @@
+python-telegram-bot==22.8
+boto3>=1.40,<2
+botocore>=1.40,<2
+cryptography>=45,<48
+python-dotenv>=1.1,<2
