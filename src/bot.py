@@ -30,6 +30,7 @@ from .ssh_password import ssh_fingerprint, change_root_password
 from .regions import format_region, region_button_rows, inactive_region_rows
 from .pricing import quote_on_demand, display_quote, os_from_instance, pricing_error_text
 from .inventory import list_account_instances, server_page
+from .account_identity import format_identity
 from .regions import REGION_LABELS
 from .region_activation import get_opt_status, enable_opt_region
 from .os_catalog import OS_CATALOG, AMI_ID, os_label, os_login, is_windows, supports_password, resolve_image
@@ -128,7 +129,7 @@ async def account_menu(update):
     await show(update,text,keyboard([
         [('➕ اتصال با IAM Key','acc:add:keys')],
         [('➕ اتصال با IAM Role','acc:add:role')],
-        [('✅ آزمایش اتصال','acctest'),('🗑 حذف اتصال','accrm')],
+        [('🔎 اطلاعات اکانت و تست اتصال','acctest'),('🗑 حذف اتصال','accrm')],
         [('🏠 منو','home')],
     ]))
 
@@ -603,12 +604,12 @@ async def on_click(update:Update,context:ContextTypes.DEFAULT_TYPE):
             warning=('⚠️ کلید IAM را به هیچ عنوان از کاربر Root نساز. ارسال رمز از طریق ربات تلگرام پایان‌به‌پایان رمزنگاری نمی‌شود.\n\n'
                      if kind=='keys' else '✅ اتصال از طریق Role امن‌تر است و کلید ثابتی به ربات ارسال نمی‌شود.\n\n')
             return await show(update,warning+'نام کوتاه برای اکانت بنویس (مثال: aws1).')
-        if data=='acctest': return await show(update,'برای تست اکانت انتخاب کن:',account_keyboard('test'))
+        if data=='acctest': return await show(update,'اکانت AWS را برای مشاهده اطلاعات ورود API انتخاب کن:',account_keyboard('test'))
         if data.startswith('test:'):
             aid=int(data.split(':')[1]); account=STORE.account(aid)
             sess=await run_io(session_for_account,account)
             identity=await run_io(lambda:sess.client('sts').get_caller_identity())
-            return await show(update,f'✅ اکانت {account["alias"]}\nAWS Account: {identity["Account"]}',home_buttons())
+            return await show(update,format_identity(account,identity),home_buttons())
         if data=='accrm':return await show(update,'⚠️ اتصال کدام اکانت حذف شود؟ سرورهای AWS حذف نمی‌شوند.',account_keyboard('rm'))
         if data.startswith('rm:'):
             aid=int(data.split(':')[1]); account=STORE.account(aid)
