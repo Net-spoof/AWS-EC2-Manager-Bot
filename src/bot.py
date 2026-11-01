@@ -31,6 +31,7 @@ from .regions import format_region, region_button_rows, inactive_region_rows
 from .pricing import quote_on_demand, display_quote, os_from_instance, pricing_error_text
 from .inventory import list_account_instances, server_page
 from .account_identity import format_identity
+from .billing import format_billing_success, format_billing_error
 from .regions import REGION_LABELS
 from .region_activation import get_opt_status, enable_opt_region, REGION_ACCESS_DENIED
 from .os_catalog import OS_CATALOG, AMI_ID, os_label, os_login, is_windows, supports_password, resolve_image
@@ -630,9 +631,13 @@ async def on_click(update:Update,context:ContextTypes.DEFAULT_TYPE):
         if data.startswith('bill:a:'):
             aid=int(data.split(':')[2]); account=STORE.account(aid)
             sess=await run_io(session_for_account,account)
-            info=await run_io(monthly_cost,sess)
-            return await show(update,f"💰 هزینه ماه جاری {account['alias']}: {float(info['value']):.2f} {info['currency']}\n"
-                                     'Cost Explorer با تأخیر به‌روزرسانی می‌شود؛ هزینه نهایی یا هزینه هر VPS نیست.',home_buttons())
+            try:
+                info=await run_io(monthly_cost,sess)
+            except (ClientError, KeyError, IndexError, ValueError) as exc:
+                log.warning('Cost Explorer report unavailable for account %s: %s',
+                            account['id'], type(exc).__name__)
+                return await show(update,format_billing_error(exc),home_buttons())
+            return await show(update,format_billing_success(account['alias'],info),home_buttons())
         if data.startswith(('new:page:', 'ls:page:')):
             kind,_,page=data.split(':')
             return await show_region_page(update,context,kind,int(page))

@@ -281,5 +281,7 @@ def monthly_cost(session):
     end=today+dt.timedelta(days=1)
     report=client.get_cost_and_usage(TimePeriod={'Start':start.isoformat(),'End':end.isoformat()},
                                      Granularity='MONTHLY',Metrics=['UnblendedCost'])
+    if not report.get('ResultsByTime'):
+        raise ValueError('AWS Cost Explorer returned no billing periods')
     cost=report['ResultsByTime'][0]['Total']['UnblendedCost']
     return {'value':cost['Amount'],'currency':cost['Unit'],'estimated':report['ResultsByTime'][0].get('Estimated',True)}
