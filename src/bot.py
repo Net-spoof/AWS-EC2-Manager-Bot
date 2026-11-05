@@ -152,15 +152,15 @@ async def show_region_page(update,context,kind,page):
     if kind == 'new':
         counts=context.user_data.get('region_probe_counts',{})
         rows.insert(-1, [('🔄 بررسی مجدد مجوز لوکیشن‌ها', 'new:regions:refresh')])
-        summary=(f"✅ {len(regions)} ریجن با آزمایش مجوز AWS تأیید شد.\\n"
+        summary=(f"✅ {len(regions)} ریجن با آزمایش مجوز AWS تأیید شد.\n"
                  f"🔒 {counts.get('blocked',0)} مسدود یا فاقد شبکه پیش‌فرض؛ "
                  f"❔ {counts.get('unknown',0)} نامشخص؛ "
-                 f"🔐 {counts.get('inactive',0)} غیرفعال.\\n"
+                 f"🔐 {counts.get('inactive',0)} غیرفعال.\n"
                  'تست با Ubuntu 24.04 و t3.small انجام شده؛ ظرفیت، سهمیه و '
                  'مشخصات دیگر ممکن است روی ساخت واقعی اثر بگذارند.')
-        return await show(update,f'🌍 {purpose} — اکانت {account["alias"]}\\n'
-                          f'صفحه {page+1}/{total_pages}\\n{summary}',keyboard(rows))
-    await show(update,f'🌍 {purpose} — اکانت {account["alias"]}\\n'
+        return await show(update,f'🌍 {purpose} — اکانت {account["alias"]}\n'
+                          f'صفحه {page+1}/{total_pages}\n{summary}',keyboard(rows))
+    await show(update,f'🌍 {purpose} — اکانت {account["alias"]}\n'
                 f'کشور و لوکیشن را انتخاب کن (صفحه {page+1} از {total_pages}):',keyboard(rows))
 
 
@@ -183,7 +183,7 @@ async def region_menu(update,context,kind,account_id):
         if not regions:
             if kind == 'new':
                 return await show(update,
-                    f'⚠️ هیچ ریجنی با اجازه ساخت سرور برای اکانت {account["alias"]} تأیید نشد.\\n'
+                    f'⚠️ هیچ ریجنی با اجازه ساخت سرور برای اکانت {account["alias"]} تأیید نشد.\n'
                     'ریجن‌های مسدود و نامشخص عمداً نمایش داده نمی‌شوند. '
                     'اگر AWS Project / Free Plan داری، محدودیت ریجن پروژه یا SCP را بررسی کن. '
                     'به‌صورت خودکار سروری ساخته نشده است.',
