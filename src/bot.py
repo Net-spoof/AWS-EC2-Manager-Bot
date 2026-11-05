@@ -345,7 +345,7 @@ async def details(update,context,account_id,region,instance_id):
     await show(update,text,keyboard([
         [('▶️ روشن',f'act:start:{base}'),('⏸ خاموش',f'act:stop:{base}')],
         [('🔄 ری‌استارت',f'act:reboot:{base}'),('📈 CPU',f'cpu:{base}')],
-        [('🛡 فایروال و Ping',f'fw:open:{base}')],
+        [('🛡 قوانین فایروال و Ping',f'fw:open:{base}')],
         [('🔐 تغییر رمز Root',f'pw:open:{base}')],
         [('🗑 حذف سرور',f'del1:{base}')],
         [('⬅️ بازگشت به سرورها',f'lsall:p:{context.user_data.get("servers_page",0)}')],
@@ -404,7 +404,8 @@ async def firewall_screen(update,context):
     lines += [f"• {fmt_rule(r)}" for r in rules[:24]] or ['• هیچ قانونی وجود ندارد']
     if len(rules)>24: lines.append(f'... و {len(rules)-24} قانون دیگر')
     rows=[[('🔕 غیرفعال کردن Ping','fw:pingoff') if ping else ('✅ فعال کردن Ping','fw:pingon')],
-          [('➕ پورت TCP','fw:add:tcp'),('➕ پورت UDP','fw:add:udp')],
+          [('➕ قانون TCP','fw:add:tcp'),('➕ قانون UDP','fw:add:udp')],
+          [('⚡ نود پاسارگارد (TCP 62050–62051)','fw:pg')],
           [('🔄 بروزرسانی','fw:refresh')]]
     for r in rules[:20]:
         if not is_ssh_protecting(r):
@@ -580,6 +581,14 @@ async def on_click(update:Update,context:ContextTypes.DEFAULT_TYPE):
             for k in ('port_start','port_end','cidr'):w.pop(k,None)
             context.user_data['pending']='fw_port'
             return await show(update,f'🔌 شماره پورت {proto.upper()} را بفرست. مثال: `443` یا `10000-10010`.')
+        if data=='fw:pg':
+            w=fw_context(context)
+            w['protocol']='tcp'
+            w['port_start']=62050
+            w['port_end']=62051
+            w.pop('cidr',None)
+            context.user_data['pending']='fw_cidr'
+            return await show(update,'🔐 باز کردن پورت‌های TCP 62050–62051 برای نود پاسارگارد.\nIPv4 مستر پنل را به صورت CIDR بفرست، مثلاً `203.0.113.5/32`.\n⚠️ برای امنیت، دسترسی 0.0.0.0/0 را انتخاب نکن. قانون پس از تأیید تو به AWS ارسال می‌شود.')
         if data=='fw:go':
             w=fw_context(context)
             if not all(k in w for k in ('protocol','port_start','port_end','cidr')):
