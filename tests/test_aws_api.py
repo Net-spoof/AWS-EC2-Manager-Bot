@@ -179,7 +179,9 @@ def _launch_session_with_denial(operation):
     err=ClientError({'Error':{'Code':'UnauthorizedOperation',
                              'Message':'You are not authorized to perform this operation. '
                              'Encoded authorization failure message: SECRET-ENCODED-STRING'}},operation)
-    getattr(ec2, operation[0].lower()+operation[1:]).side_effect=err
+    import re
+    method = re.sub(r'(?<!^)(?=[A-Z])', '_', operation).lower()
+    getattr(ec2, method).side_effect = err
     session=Mock()
     session.client.side_effect=lambda name,**kwargs:{'ec2':ec2, 'ssm':ssm}[name]
     return session,ec2
