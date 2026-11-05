@@ -3,6 +3,7 @@
 Never show AWS encoded authorization messages, credentials, or raw exceptions
 in a bot chat. Expose only action, region and independently identified deny type.
 """
+import re
 from botocore.exceptions import ClientError
 
 
@@ -70,3 +71,44 @@ def display_launch_denial(exc):
         '⚠️ AdministratorAccess محدودیت SCP را برطرف نمی‌کند. برای این خطا مجوزها را کورکورانه گسترش نده.',
     ])
     return '\n'.join(lines)
+
+
+class EC2LaunchParameterError(Exception):
+    def __init__(self, operation, region, code, reason):
+        super().__init__(code)
+        self.operation, self.region = operation, region
+        self.code, self.reason = code, reason
+
+
+def transform_launch_parameter_error(exc, stage, region):
+    """Preserve operation and safe service validation explanation, not credentials."""
+    if not isinstance(exc, ClientError):
+        return None
+    e=exc.response.get('Error',{})
+    code=e.get('Code','')
+    if code not in ('InvalidParameterCombination','InvalidParameterValue',
+                    'InvalidBlockDeviceMapping','InvalidParameter'):
+        return None
+    msg=e.get('Message','')
+    if not isinstance(msg,str):
+        msg=''
+    msg=' '.join(msg.split())
+    if (len(msg)>500 or re.search(
+        r'(?i)(secret|password|credential|access.?key|session.?token|'
+        r'encoded|authorization|user.?data|cloud.?init|bearer|arn:aws:|https?://|'
+        r'AKIA[A-Z0-9]{10}|ASIA[A-Z0-9]{10}|'
+        r'[A-Za-z0-9+/=_-]{60,})',msg)
+        or re.search(r'@|\b[0-9]{12}\b',msg)):
+        msg=''
+    return EC2LaunchParameterError(
+        getattr(exc,'operation_name',None) or stage, region, code, msg[:320])
+
+
+def display_launch_parameter_error(exc):
+    return ('❌ AWS پارامترهای ساخت سرور را رد کرد.\n'
+            f'🛑 مرحله: {exc.operation}\n'
+            f'🌍 ریجن: {exc.region}\n'
+            f'کد AWS: {exc.code}\n'
+            + (f'📋 دلیل AWS: {exc.reason}\n' if exc.reason else
+               '📋 شرح AWS قابل نمایش امن نبود.\n')
+            + 'ℹ️ این خطا لزوماً مشکل مجوز IAM نیست. نوع سرور، AMI، دیسک و شبکه را بررسی کن.')

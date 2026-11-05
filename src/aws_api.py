@@ -10,7 +10,7 @@ import uuid
 import boto3
 from botocore.config import Config
 from botocore.exceptions import ClientError
-from .launch_errors import transform_launch_denial
+from .launch_errors import transform_launch_denial, transform_launch_parameter_error
 
 AWS_CONFIG = Config(connect_timeout=8, read_timeout=25, retries={'max_attempts': 3, 'mode':'standard'})
 UBUNTU = {'22.04': ('jammy', 'ebs-gp2'), '24.04':('noble','ebs-gp3'), '26.04':('resolute','ebs-gp3')}
@@ -158,6 +158,8 @@ def create_instance(session, region, name, release, instance_type, disk_gb, ssh_
         denial = transform_launch_denial(exc, 'ec2:DescribeVpcs / DescribeSubnets', region)
         if denial is not None:
             raise denial from exc
+        bad = transform_launch_parameter_error(exc,'DescribeVpcs/DescribeSubnets',region)
+        if bad is not None: raise bad from exc
         raise
     try:
         image_info = resolve_image(session, region, os_id, release, custom_ami)
@@ -165,12 +167,16 @@ def create_instance(session, region, name, release, instance_type, disk_gb, ssh_
         denial = transform_launch_denial(exc, 'ssm:GetParameter / ec2:DescribeImages', region)
         if denial is not None:
             raise denial from exc
+        bad = transform_launch_parameter_error(exc,'ResolveAMI',region)
+        if bad is not None: raise bad from exc
         raise
     ami = image_info['image_id']
     root_device = image_info['root_device']
     min_disk = image_info['minimum_disk']
     if disk_gb < min_disk:
         raise ValueError(f'این ایمیج حداقل {min_disk} GiB دیسک نیاز دارد')
+    from .os_catalog import check_ami_instance_type
+    check_ami_instance_type(image_info.get('instance_type_specification'), instance_type)
     platform=image_info['platform']
     if platform=='windows' and access_mode!='key':
         raise ValueError('Windows Server به کلید خصوصی برای دریافت رمز Administrator نیاز دارد')
@@ -224,6 +230,8 @@ def create_instance(session, region, name, release, instance_type, disk_gb, ssh_
         denial = transform_launch_denial(exc, step, region)
         if denial is not None:
             raise denial from exc
+        bad = transform_launch_parameter_error(exc,step,region)
+        if bad is not None: raise bad from exc
         raise
 
 

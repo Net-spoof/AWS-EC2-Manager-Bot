@@ -1,5 +1,6 @@
 """Allowlisted OS choices and AWS AMI discovery for x86_64 EBS-based EC2."""
 import re
+from fnmatch import fnmatchcase
 
 # Registry is *not* an exhaustive catalog of AWS Marketplace products.
 # Advanced users can choose any accessible compatible AMI by its ID.
@@ -27,7 +28,115 @@ PUBLISHED_IMAGES = {
     'suse': ('013907871322', 'suse-sles-{version}-sp*-v*-hvm-ssd-x86_64*'),
     'rocky': ('792107900819', 'Rocky-{version}-EC2-Base-*-x86_64*'),
 }
-AMI_ID = re.compile(r'^ami-[0-9a-f]{8}(?:[0-9a-f]{9})?$')
+AMI_ID = re.compile(r'^ami-[0-9a-f]{8}(?:[0-9a-f]{9})?
+
+
+def os_label(os_id, version):
+    if os_id == 'custom':
+        return '🛠 AMI دلخواه'
+    family = OS_CATALOG[os_id]
+    return f"{family['label']} — {family['versions'][version]}"
+
+
+def os_login(os_id):
+    return OS_CATALOG[os_id]['user']
+
+
+def supports_password(os_id):
+    return OS_CATALOG[os_id]['password']
+
+
+def is_windows(os_id):
+    return bool(OS_CATALOG[os_id].get('rdp'))
+
+
+def resolve_image(session, region, os_id, version, ami_id=None):
+    """Resolve a publisher-verified AMI with Architecture x86_64 and EBS root.
+
+    Custom images require an explicit exact AMI ID; Windows images are always
+    detected from EC2 metadata so a Windows AMI cannot be mislaunched as Linux.
+    """
+    if os_id not in OS_CATALOG:
+        raise ValueError('سیستم‌عامل انتخاب‌شده معتبر نیست')
+    if os_id != 'custom' and version not in OS_CATALOG[os_id]['versions']:
+        raise ValueError('نسخه سیستم‌عامل معتبر نیست')
+    ec2 = session.client('ec2', region_name=region)
+    expected_owner = None
+    if os_id == 'custom':
+        if not isinstance(ami_id,str) or not AMI_ID.fullmatch(ami_id):
+            raise ValueError('شناسه AMI معتبر نیست (مثال: ami-0123456789abcdef0)')
+    elif os_id == 'ubuntu':
+        # Imported lazily to avoid a circular module dependency.
+        from .aws_api import resolve_ubuntu_ami
+        ami_id = resolve_ubuntu_ami(session, region, version)
+        expected_owner = '099720109477'
+    elif (os_id, version) in SSM_PATHS:
+        ssm = session.client('ssm', region_name=region)
+        ami_id = ssm.get_parameter(Name=SSM_PATHS[(os_id, version)])['Parameter']['Value']
+    else:
+        owner, pattern = PUBLISHED_IMAGES[os_id]
+        response = ec2.describe_images(Owners=[owner], Filters=[
+            {'Name':'name', 'Values':[pattern.format(version=version)]},
+            {'Name':'architecture', 'Values':['x86_64']},
+            {'Name':'root-device-type', 'Values':['ebs']},
+            {'Name':'state', 'Values':['available']},
+        ])
+        images = [image for image in response.get('Images', [])
+                  if image.get('OwnerId',owner) == owner
+                  and image.get('Name','').lower().find('arm64') == -1
+                  and image.get('State','available') == 'available'
+                  and image.get('DeprecationTime') is None]
+        if os_id == 'debian':
+            images = [image for image in images if not image.get('Name','').startswith(f'debian-{version}-backports')]
+        if os_id == 'rhel':
+            images = [image for image in images if 'Hourly' in image.get('Name','')]
+        if not images:
+            raise ValueError('ایمیج رسمی این نسخه در ریجن انتخابی پیدا نشد. نسخه دیگری را انتخاب کن یا AMI دلخواه وارد کن.')
+        ami_id = max(images, key=lambda x: x.get('CreationDate',''))['ImageId']
+        expected_owner = owner
+    result = ec2.describe_images(ImageIds=[ami_id])['Images']
+    if not result:
+        raise ValueError('AMI قابل دسترسی نیست')
+    image = result[0]
+    if expected_owner and image.get('OwnerId') and image['OwnerId'] != expected_owner:
+        raise ValueError('ناشر AMI با ناشر رسمی سیستم‌عامل مطابقت ندارد')
+    if image.get('Architecture','x86_64') != 'x86_64' or image.get('RootDeviceType','ebs') != 'ebs':
+        raise ValueError('فقط AMI با معماری x86_64 و ریشه EBS پشتیبانی می‌شود')
+    if image.get('State','available') != 'available':
+        raise ValueError('AMI در وضعیت available نیست')
+    is_win = image.get('Platform') == 'windows' or 'Windows' in image.get('PlatformDetails','')
+    if os_id == 'custom':
+        platform='windows' if is_win else 'linux'
+    else:
+        platform='windows' if is_windows(os_id) else 'linux'
+        if is_win != is_windows(os_id):
+            raise ValueError('نوع سیستم‌عامل AMI با گزینه انتخابی مطابقت ندارد')
+    root = image.get('RootDeviceName') or '/dev/sda1'
+    minimum = 8
+    for block in image.get('BlockDeviceMappings', []):
+        if block.get('DeviceName') == root:
+            minimum = int(block.get('Ebs',{}).get('VolumeSize',minimum))
+            break
+    return {'image_id':ami_id, 'root_device':root, 'minimum_disk':max(12,minimum),
+            'platform':platform, 'user':OS_CATALOG[os_id]['user'],
+            'name':image.get('Name',''), 'os_id':os_id,
+            'instance_type_specification':image.get('InstanceTypeSpecification')}
+)
+
+
+def check_ami_instance_type(spec, instance_type):
+    """Validate AMI-declared instance type allow/deny rules before launch."""
+    if not isinstance(spec,dict):
+        return
+    def matched(rows):
+        return any(fnmatchcase(instance_type, row['InstanceType'])
+                   for row in rows if isinstance(row,dict)
+                   and isinstance(row.get('InstanceType'),str))
+    denied=spec.get('UnsupportedInstanceTypes') or []
+    allowed=spec.get('SupportedInstanceTypes') or []
+    if matched(denied) or (allowed and not matched(allowed)):
+        raise ValueError(f'این AMI از نوع سرور {instance_type} پشتیبانی نمی‌کند؛ نوع یا AMI دیگری انتخاب کن.')
+
 
 
 def os_label(os_id, version):

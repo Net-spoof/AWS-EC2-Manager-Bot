@@ -94,3 +94,20 @@ def test_bot_windows_type_buttons_exclude_micro_and_small():
 def test_pricing_rejects_custom_without_inventing_licensed_rate():
     with pytest.raises(ValueError,match='AWS'):
         quote_on_demand(Mock(),'eu-north-1','t3.medium',40,'custom')
+
+
+def test_ami_compatibility_rules_are_enforced_before_launch():
+    from src.os_catalog import check_ami_instance_type
+    check_ami_instance_type(None,'t3.small')
+    check_ami_instance_type({'SupportedInstanceTypes':[{'InstanceType':'t3.*'}]},'t3.small')
+    with pytest.raises(ValueError,match='پشتیبانی'):
+        check_ami_instance_type({'SupportedInstanceTypes':[{'InstanceType':'m5.large'}]},'t3.small')
+    with pytest.raises(ValueError,match='پشتیبانی'):
+        check_ami_instance_type({'UnsupportedInstanceTypes':[{'InstanceType':'t3.*'}]},'t3.small')
+    image=win_image()
+    image['InstanceTypeSpecification']={'SupportedInstanceTypes':[{'InstanceType':'m5.large'}]}
+    sess,ec2,_=fake_ec2_session(image)
+    with pytest.raises(ValueError,match='پشتیبانی'):
+        create_instance(sess,'eu-north-1','vm','2025','t3.medium',40,
+                        '198.51.100.15/32','key',os_id='windows')
+    ec2.create_security_group.assert_not_called()

@@ -224,3 +224,22 @@ def test_scp_hint_is_based_on_aws_message_not_inferred():
     assert b.deny_type is None
     assert 'علت دقیق' in display_launch_denial(b)
     assert 'ENCODED-SECRET' not in display_launch_denial(b)
+
+
+def test_invalid_parameter_combination_shows_aws_message_safely():
+    from botocore.exceptions import ClientError
+    from src.launch_errors import transform_launch_parameter_error,display_launch_parameter_error
+    bad=ClientError({'Error':{
+        'Code':'InvalidParameterCombination',
+        'Message':'This AMI does not support the specified instance type.'
+    }},'RunInstances')
+    exc=transform_launch_parameter_error(bad,'ec2:RunInstances','us-east-1')
+    message=display_launch_parameter_error(exc)
+    assert 'RunInstances' in message and 'us-east-1' in message
+    assert 'This AMI does not support' in message
+    secret=ClientError({'Error':{
+        'Code':'InvalidParameterCombination',
+        'Message':'UserData password=PRIVATE_SECRET'
+    }},'RunInstances')
+    assert 'PRIVATE_SECRET' not in display_launch_parameter_error(
+        transform_launch_parameter_error(secret,'ec2:RunInstances','us-east-1'))
