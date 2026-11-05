@@ -31,6 +31,7 @@ from .regions import format_region, region_button_rows, inactive_region_rows
 from .pricing import quote_on_demand, display_quote, os_from_instance, pricing_error_text
 from .inventory import list_account_instances, server_page
 from .account_identity import format_identity
+from .launch_errors import EC2LaunchPermissionError, display_launch_denial
 from .billing import format_billing_success, format_billing_error
 from .regions import REGION_LABELS
 from .region_activation import get_opt_status, enable_opt_region, REGION_ACCESS_DENIED
@@ -85,6 +86,8 @@ async def authorized(update):
 
 
 def error_message(exc):
+    if isinstance(exc, EC2LaunchPermissionError):
+        return display_launch_denial(exc)
     if isinstance(exc,ClientError):
         error = exc.response.get('Error',{})
         # Show AWS error code; avoid accidentally echoing sensitive request parameters.

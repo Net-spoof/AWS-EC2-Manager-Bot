@@ -9,6 +9,8 @@ import string
 import uuid
 import boto3
 from botocore.config import Config
+from botocore.exceptions import ClientError
+from .launch_errors import transform_launch_denial
 
 AWS_CONFIG = Config(connect_timeout=8, read_timeout=25, retries={'max_attempts': 3, 'mode':'standard'})
 UBUNTU = {'22.04': ('jammy', 'ebs-gp2'), '24.04':('noble','ebs-gp3'), '26.04':('resolute','ebs-gp3')}
@@ -150,8 +152,20 @@ def create_instance(session, region, name, release, instance_type, disk_gb, ssh_
     if access_mode not in ('password','root_password','key'):
         raise ValueError('Invalid login mode')
     ec2 = session.client('ec2',region_name=region,config=AWS_CONFIG)
-    vpc, subnet = ensure_default_vpc_subnet(ec2)
-    image_info = resolve_image(session, region, os_id, release, custom_ami)
+    try:
+        vpc, subnet = ensure_default_vpc_subnet(ec2)
+    except ClientError as exc:
+        denial = transform_launch_denial(exc, 'ec2:DescribeVpcs / DescribeSubnets', region)
+        if denial is not None:
+            raise denial from exc
+        raise
+    try:
+        image_info = resolve_image(session, region, os_id, release, custom_ami)
+    except ClientError as exc:
+        denial = transform_launch_denial(exc, 'ssm:GetParameter / ec2:DescribeImages', region)
+        if denial is not None:
+            raise denial from exc
+        raise
     ami = image_info['image_id']
     root_device = image_info['root_device']
     min_disk = image_info['minimum_disk']
@@ -165,15 +179,18 @@ def create_instance(session, region, name, release, instance_type, disk_gb, ssh_
     key_name = None
     key_material = None
     instance_id = None
+    step = 'ec2:CreateSecurityGroup'
     try:
         group_name = 'ec2-manager-' + uuid.uuid4().hex[:15]
         security_group = ec2.create_security_group(GroupName=group_name,
                        Description='Managed access for AWS EC2 Manager Bot',VpcId=vpc)['GroupId']
         port = 3389 if platform == 'windows' else 22
+        step = 'ec2:AuthorizeSecurityGroupIngress'
         ec2.authorize_security_group_ingress(GroupId=security_group, IpPermissions=[{
             'IpProtocol':'tcp','FromPort':port,'ToPort':port,
             'IpRanges':[{'CidrIp':cidr,'Description':'RDP access' if port==3389 else 'SSH access'}]}])
         if access_mode == 'key':
+            step = 'ec2:CreateKeyPair'
             key_name = 'ec2-manager-' + uuid.uuid4().hex[:15]
             key_material = ec2.create_key_pair(KeyName=key_name,KeyType='rsa',KeyFormat='pem')['KeyMaterial']
         params = dict(
@@ -191,11 +208,12 @@ def create_instance(session, region, name, release, instance_type, disk_gb, ssh_
             params['KeyName'] = key_name
         if password:
             params['UserData'] = cloud_init_password(password, root_login=access_mode == 'root_password')
+        step = 'ec2:RunInstances'
         instance_id = ec2.run_instances(**params)['Instances'][0]['InstanceId']
         return {'id':instance_id,'password':password,'pem':key_material,'key_name':key_name,
                 'sg_id':security_group, 'platform':platform, 'user':'root' if access_mode == 'root_password' else image_info['user'],
                 'ami':ami, 'os_id':os_id}
-    except Exception:
+    except Exception as exc:
         if instance_id is None:
             if key_name:
                 try: ec2.delete_key_pair(KeyName=key_name)
@@ -203,6 +221,9 @@ def create_instance(session, region, name, release, instance_type, disk_gb, ssh_
             if security_group:
                 try: ec2.delete_security_group(GroupId=security_group)
                 except Exception: pass
+        denial = transform_launch_denial(exc, step, region)
+        if denial is not None:
+            raise denial from exc
         raise
 
 

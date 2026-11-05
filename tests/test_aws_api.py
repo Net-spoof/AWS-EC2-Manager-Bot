@@ -161,3 +161,64 @@ def test_root_password_rejected_for_non_ubuntu():
     with pytest.raises(ValueError, match='Ubuntu'):
         create_instance(sess,'eu-central-1','root-test','12','t3.micro',20,'203.0.113.1/32','root_password','debian')
     assert not sess.client.called
+
+
+
+def _launch_session_with_denial(operation):
+    from unittest.mock import Mock
+    from botocore.exceptions import ClientError
+
+    ec2 = Mock()
+    ssm = Mock()
+    ec2.describe_vpcs.return_value={'Vpcs':[{'VpcId':'vpc-001'}]}
+    ec2.describe_subnets.return_value={'Subnets':[{'SubnetId':'subnet-001','AvailabilityZone':'eu-north-1a'}]}
+    ec2.describe_images.return_value={'Images':[{'RootDeviceName':'/dev/sda1', 'BlockDeviceMappings':[]}]}
+    ec2.create_security_group.return_value={'GroupId':'sg-001'}
+    ec2.create_key_pair.return_value={'KeyMaterial':'FAKE'}
+    ssm.get_parameter.return_value={'Parameter':{'Value':'ami-001'}}
+    err=ClientError({'Error':{'Code':'UnauthorizedOperation',
+                             'Message':'You are not authorized to perform this operation. '
+                             'Encoded authorization failure message: SECRET-ENCODED-STRING'}},operation)
+    getattr(ec2, operation[0].lower()+operation[1:]).side_effect=err
+    session=Mock()
+    session.client.side_effect=lambda name,**kwargs:{'ec2':ec2, 'ssm':ssm}[name]
+    return session,ec2
+
+
+def test_launch_denial_identifies_security_group_action_without_leaking_aws_encoded_message():
+    from src.aws_api import create_instance
+    from src.launch_errors import EC2LaunchPermissionError, display_launch_denial
+    session, ec2 = _launch_session_with_denial('CreateSecurityGroup')
+    with pytest.raises(EC2LaunchPermissionError) as e:
+        create_instance(session,'eu-north-1','test-server','24.04','t3.small',20,'203.0.113.5/32','password')
+    text=display_launch_denial(e.value)
+    assert 'ec2:CreateSecurityGroup' in text
+    assert 'eu-north-1' in text
+    assert 'SECRET-ENCODED-STRING' not in text
+    ec2.run_instances.assert_not_called()
+
+
+def test_launch_denial_in_runinstances_reports_step_and_keeps_cleanup():
+    from src.aws_api import create_instance
+    from src.launch_errors import EC2LaunchPermissionError, display_launch_denial
+    session, ec2 = _launch_session_with_denial('RunInstances')
+    with pytest.raises(EC2LaunchPermissionError) as e:
+        create_instance(session,'eu-north-1','test-server','24.04','t3.small',20,'203.0.113.5/32','key')
+    assert 'ec2:RunInstances' in display_launch_denial(e.value)
+    ec2.delete_security_group.assert_called_once_with(GroupId='sg-001')
+    ec2.delete_key_pair.assert_called_once()
+
+
+def test_scp_hint_is_based_on_aws_message_not_inferred():
+    from botocore.exceptions import ClientError
+    from src.launch_errors import transform_launch_denial, display_launch_denial
+    def err(message):
+        return ClientError({'Error':{'Code':'UnauthorizedOperation','Message':message}},'RunInstances')
+    a=transform_launch_denial(err('because of an explicit deny in a service control policy'),
+                             'ec2:RunInstances','eu-north-1')
+    b=transform_launch_denial(err('generic denied: ENCODED-SECRET'),
+                             'ec2:RunInstances','eu-north-1')
+    assert a.deny_type=='SCP'
+    assert b.deny_type is None
+    assert 'علت دقیق' in display_launch_denial(b)
+    assert 'ENCODED-SECRET' not in display_launch_denial(b)
