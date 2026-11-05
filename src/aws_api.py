@@ -88,7 +88,22 @@ def resolve_ubuntu_ami(session, region, release):
     return ssm.get_parameter(Name=name)['Parameter']['Value']
 
 
-def ensure_default_vpc_subnet(ec2):
+def subnet_has_ipv6(subnet):
+    """AWS can assign IPv6 only when the subnet IPv6 CIDR is associated."""
+    return any(
+        isinstance(item,dict)
+        and item.get('Ipv6CidrBlock')
+        and item.get('Ipv6CidrBlockState',{}).get('State') == 'associated'
+        for item in subnet.get('Ipv6CidrBlockAssociationSet', [])
+    )
+
+
+def ensure_default_vpc_subnet(ec2, include_ipv6=False):
+    """Choose a default subnet; prefer existing dual-stack subnet for new EC2.
+
+    This function only reads metadata. It never associates a VPC/subnet CIDR.
+    The default two-value response preserves callers and previous behavior.
+    """
     vpcs = ec2.describe_vpcs(Filters=[{'Name':'is-default','Values':['true']}])['Vpcs']
     if not vpcs:
         raise ValueError('No default VPC in this region. Create/restore one first in AWS.')
@@ -97,7 +112,16 @@ def ensure_default_vpc_subnet(ec2):
                                           {'Name':'default-for-az','Values':['true']}])['Subnets']
     if not subnets:
         raise ValueError('Default VPC has no default subnet.')
-    return vpc_id, sorted(subnets,key=lambda subnet:subnet['AvailabilityZone'])[0]['SubnetId']
+    chosen = sorted(
+        subnets,
+        key=lambda item: (
+            not subnet_has_ipv6(item) if include_ipv6 else False,
+            item['AvailabilityZone']
+        ),
+    )[0]
+    if include_ipv6:
+        return vpc_id, chosen['SubnetId'], subnet_has_ipv6(chosen)
+    return vpc_id, chosen['SubnetId']
 
 
 def cloud_init_password(password, root_login=False):
@@ -153,7 +177,7 @@ def create_instance(session, region, name, release, instance_type, disk_gb, ssh_
         raise ValueError('Invalid login mode')
     ec2 = session.client('ec2',region_name=region,config=AWS_CONFIG)
     try:
-        vpc, subnet = ensure_default_vpc_subnet(ec2)
+        vpc, subnet, ipv6_ready = ensure_default_vpc_subnet(ec2, include_ipv6=True)
     except ClientError as exc:
         denial = transform_launch_denial(exc, 'ec2:DescribeVpcs / DescribeSubnets', region)
         if denial is not None:
@@ -199,11 +223,21 @@ def create_instance(session, region, name, release, instance_type, disk_gb, ssh_
             step = 'ec2:CreateKeyPair'
             key_name = 'ec2-manager-' + uuid.uuid4().hex[:15]
             key_material = ec2.create_key_pair(KeyName=key_name,KeyType='rsa',KeyFormat='pem')['KeyMaterial']
+        network_interface = {
+            'DeviceIndex': 0,
+            'SubnetId': subnet,
+            'Groups': [security_group],
+            'AssociatePublicIpAddress': True,
+            'DeleteOnTermination': True,
+        }
+        if ipv6_ready:
+            # Ipv6AddressCount must be set *inside* NetworkInterfaces
+            # when an explicit network interface is used in RunInstances.
+            network_interface['Ipv6AddressCount'] = 1
         params = dict(
             ImageId=ami, InstanceType=instance_type, MinCount=1,MaxCount=1,
             ClientToken=uuid.uuid4().hex,
-            NetworkInterfaces=[{'DeviceIndex':0,'SubnetId':subnet,'Groups':[security_group],
-                                'AssociatePublicIpAddress':True,'DeleteOnTermination':True}],
+            NetworkInterfaces=[network_interface],
             BlockDeviceMappings=[{'DeviceName':root_device,'Ebs':{'VolumeSize':disk_gb,'VolumeType':'gp3',
                                                                'Encrypted':True,'DeleteOnTermination':True}}],
             MetadataOptions={'HttpTokens':'required','HttpEndpoint':'enabled'},
@@ -215,10 +249,13 @@ def create_instance(session, region, name, release, instance_type, disk_gb, ssh_
         if password:
             params['UserData'] = cloud_init_password(password, root_login=access_mode == 'root_password')
         step = 'ec2:RunInstances'
-        instance_id = ec2.run_instances(**params)['Instances'][0]['InstanceId']
+        instance = ec2.run_instances(**params)['Instances'][0]
+        instance_id = instance['InstanceId']
+        ipv6_addresses = extract_instance_ipv6(instance)
         return {'id':instance_id,'password':password,'pem':key_material,'key_name':key_name,
                 'sg_id':security_group, 'platform':platform, 'user':'root' if access_mode == 'root_password' else image_info['user'],
-                'ami':ami, 'os_id':os_id}
+                'ami':ami, 'os_id':os_id, 'ipv6':ipv6_addresses,
+                'ipv6_requested':ipv6_ready}
     except Exception as exc:
         if instance_id is None:
             if key_name:
@@ -251,12 +288,23 @@ def list_instances(session, region):
     return sorted(rows,key=lambda r:r['launched'],reverse=True)[:100]
 
 
+def extract_instance_ipv6(instance):
+    """Extract addresses assigned to network interfaces in AWS EC2 responses."""
+    return sorted({
+        item['Ipv6Address']
+        for nic in instance.get('NetworkInterfaces', [])
+        for item in nic.get('Ipv6Addresses', [])
+        if isinstance(item,dict) and item.get('Ipv6Address')
+    })
+
+
 def instance_details(session, region, instance_id):
     ec2 = session.client('ec2',region_name=region,config=AWS_CONFIG)
     inst = ec2.describe_instances(InstanceIds=[instance_id])['Reservations'][0]['Instances'][0]
     tags = {t['Key']:t['Value'] for t in inst.get('Tags',[])}
     return {'id':instance_id,'name':tags.get('Name','Unnamed'),'state':inst['State']['Name'],
             'ip':inst.get('PublicIpAddress','—'),'private_ip':inst.get('PrivateIpAddress','—'),
+            'ipv6':extract_instance_ipv6(inst),
             'type':inst['InstanceType'],'key_name':inst.get('KeyName','—'),
             'zone':inst['Placement']['AvailabilityZone'],'vpc':inst.get('VpcId','—'),
             'platform':'windows' if inst.get('Platform')=='windows' or 'Windows' in inst.get('PlatformDetails','') else 'linux',

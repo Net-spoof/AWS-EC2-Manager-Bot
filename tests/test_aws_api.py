@@ -243,3 +243,91 @@ def test_invalid_parameter_combination_shows_aws_message_safely():
     }},'RunInstances')
     assert 'PRIVATE_SECRET' not in display_launch_parameter_error(
         transform_launch_parameter_error(secret,'ec2:RunInstances','us-east-1'))
+
+
+def test_default_subnet_prefers_dual_stack_only_for_ipv6_requests():
+    from unittest.mock import Mock
+    from src.aws_api import ensure_default_vpc_subnet
+    ec2=Mock()
+    ec2.describe_vpcs.return_value={'Vpcs':[{'VpcId':'vpc-001'}]}
+    ec2.describe_subnets.return_value={'Subnets':[
+        {'SubnetId':'subnet-v4', 'AvailabilityZone':'eu-north-1a'},
+        {'SubnetId':'subnet-dual', 'AvailabilityZone':'eu-north-1b',
+         'Ipv6CidrBlockAssociationSet':[{
+             'Ipv6CidrBlock':'2600:1f18::/64',
+             'Ipv6CidrBlockState':{'State':'associated'}
+         }]},
+    ]}
+    assert ensure_default_vpc_subnet(ec2)==('vpc-001','subnet-v4')
+    assert ensure_default_vpc_subnet(ec2,include_ipv6=True)==(
+        'vpc-001','subnet-dual',True)
+
+
+def test_ipv6_provisioning_uses_network_interface_field_and_returns_address():
+    from unittest.mock import Mock
+    from src.aws_api import create_instance
+    ec2=Mock()
+    ssm=Mock()
+    ec2.describe_vpcs.return_value={'Vpcs':[{'VpcId':'vpc-001'}]}
+    ec2.describe_subnets.return_value={'Subnets':[
+        {'SubnetId':'subnet-001','AvailabilityZone':'us-east-1a',
+         'Ipv6CidrBlockAssociationSet':[{
+             'Ipv6CidrBlock':'2600:1f18::/64',
+             'Ipv6CidrBlockState':{'State':'associated'} }]}
+    ]}
+    ec2.describe_images.return_value={'Images':[{'RootDeviceName':'/dev/sda1','BlockDeviceMappings':[]}]}
+    ec2.create_security_group.return_value={'GroupId':'sg-001'}
+    ssm.get_parameter.return_value={'Parameter':{'Value':'ami-001'}}
+    ec2.run_instances.return_value={'Instances':[{
+        'InstanceId':'i-00000000000000001',
+        'NetworkInterfaces':[{'Ipv6Addresses':[{'Ipv6Address':'2600:1f18::1234'}]}]
+    }]}
+    sess=Mock()
+    sess.client.side_effect=lambda service,**kwargs:{'ec2':ec2,'ssm':ssm}[service]
+    result=create_instance(sess,'us-east-1','ipv6-test','24.04','t3.small',
+                           20,'198.51.100.10/32','password')
+    network=ec2.run_instances.call_args.kwargs['NetworkInterfaces'][0]
+    assert network['Ipv6AddressCount']==1
+    assert network['AssociatePublicIpAddress'] is True
+    assert result['ipv6']==['2600:1f18::1234']
+    assert result['ipv6_requested'] is True
+    ec2.associate_vpc_cidr_block.assert_not_called()
+    ec2.associate_subnet_cidr_block.assert_not_called()
+
+
+def test_ipv4_network_without_ipv6_range_never_requests_ipv6():
+    from unittest.mock import Mock
+    from src.aws_api import create_instance
+    ec2=Mock()
+    ssm=Mock()
+    ec2.describe_vpcs.return_value={'Vpcs':[{'VpcId':'vpc-001'}]}
+    ec2.describe_subnets.return_value={'Subnets':[
+        {'SubnetId':'subnet-001','AvailabilityZone':'eu-north-1a'}
+    ]}
+    ec2.describe_images.return_value={'Images':[{'RootDeviceName':'/dev/sda1','BlockDeviceMappings':[]}]}
+    ec2.create_security_group.return_value={'GroupId':'sg-001'}
+    ec2.run_instances.return_value={'Instances':[{'InstanceId':'i-00000000000000001'}]}
+    ssm.get_parameter.return_value={'Parameter':{'Value':'ami-001'}}
+    sess=Mock()
+    sess.client.side_effect=lambda service,**kwargs:{'ec2':ec2,'ssm':ssm}[service]
+    result=create_instance(sess,'eu-north-1','ipv4-test','24.04','t3.small',
+                           20,'198.51.100.10/32','password')
+    network=ec2.run_instances.call_args.kwargs['NetworkInterfaces'][0]
+    assert 'Ipv6AddressCount' not in network
+    assert result['ipv6']==[]
+    assert result['ipv6_requested'] is False
+
+
+def test_existing_instance_details_include_ipv6_from_eni():
+    from unittest.mock import Mock
+    from src.aws_api import instance_details
+    ec2=Mock()
+    ec2.describe_instances.return_value={'Reservations':[{'Instances':[{
+        'InstanceId':'i-00000000000000001','State':{'Name':'running'},
+        'InstanceType':'t3.small','Placement':{'AvailabilityZone':'us-east-1a'},
+        'NetworkInterfaces':[{'Ipv6Addresses':[{'Ipv6Address':'2600:1f18::aa'}]}],
+        'BlockDeviceMappings':[]
+    }]}]}
+    sess=Mock()
+    sess.client.return_value=ec2
+    assert instance_details(sess,'us-east-1','i-00000000000000001')['ipv6']==['2600:1f18::aa']

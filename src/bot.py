@@ -332,8 +332,10 @@ async def details(update,context,account_id,region,instance_id):
     if info['state']!='running':
         estimate+='\nℹ️ این قیمت برآورد حالت روشن بودن است؛ هزینه دیسک در حالت خاموش هم ادامه دارد.'
 
+    ipv6_info=', '.join(info.get('ipv6') or []) or '— (اختصاص داده نشده)'
     text=(f"🖥 {info['name']}\nID: {info['id']}\nStatus: {info['state']}\n"
           f"Public IP: {info['ip']}\nPrivate IP: {info['private_ip']}\n"
+          f"IPv6: {ipv6_info}\n"
           f"Type: {info['type']}\nRegion: {format_region(region)}\nAZ: {info['zone']}\nSSH key: {info['key_name']}\n"
           f"Platform: {info['platform']}\n"
           f"Disk: {disk_label}\n"
@@ -839,9 +841,17 @@ async def on_click(update:Update,context:ContextTypes.DEFAULT_TYPE):
                  + ('برای ورود با رمز از ssh '+user+'@SERVER_IP استفاده کن.' if w.get('access') == 'password'
                     else f'برای ورود با کلید از ssh -i key.pem {user}@SERVER_IP استفاده کن.'))
             )
+            if result.get('ipv6'):
+                ipv6_note='IPv6: '+', '.join(result['ipv6'])+'\n'
+            elif result.get('ipv6_requested'):
+                ipv6_note='IPv6: درخواست شد؛ آدرس را در «سرورها» بررسی کن.\n'
+            else:
+                ipv6_note=('IPv6: ارائه نشد؛ Subnet پیش‌فرض فاقد IPv6 CIDR است. '
+                           'برای فعال‌سازی، VPC و Subnet را در AWS تنظیم کن.\n')
             output=(f"✅ سرور ایجاد شد.\nAccount: {account['alias']}\nInstance ID: {result['id']}\n"
                     f"Region: {format_region(w['region'])}\nOS: {os_label(w['os_id'],w['release'])}\n"
-                    f"AMI: {result['ami']}\nUser: {user}\n\n"
+                    f"AMI: {result['ami']}\nUser: {user}\n"
+                    f"{ipv6_note}\n"
                     f"{display_quote(w.get('quote'), w.get('quote_error'))}\n\n"
                     'IP عمومی ممکن است چند لحظه بعد اختصاص داده شود. از «سرورها» بررسی کن.\n'+details_msg)
             await update.effective_message.reply_text(output,reply_markup=home_buttons())
