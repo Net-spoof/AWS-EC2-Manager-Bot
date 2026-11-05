@@ -30,6 +30,7 @@ from .ssh_password import ssh_fingerprint, change_root_password
 from .regions import format_region, region_button_rows, inactive_region_rows
 from .pricing import quote_on_demand, display_quote, os_from_instance, pricing_error_text
 from .inventory import list_account_instances, server_page
+from .launch_regions import find_launchable_regions
 from .account_identity import format_identity
 from .launch_errors import EC2LaunchPermissionError, display_launch_denial
 from .billing import format_billing_success, format_billing_error
@@ -145,10 +146,21 @@ async def show_region_page(update,context,kind,page):
     regions=context.user_data.get('region_choices',[])
     rows,total_pages=region_button_rows(regions,kind,page)
     inactive=context.user_data.get('region_inactive',[])
-    if inactive:
+    if inactive and kind != 'new':
         rows.insert(-1, [('🔒 سایر لوکیشن‌ها (نیازمند فعال‌سازی) · '+str(len(inactive)), f'{kind}:inactive:0')])
     purpose='ساخت سرور جدید' if kind=='new' else 'مشاهده سرورها'
-    await show(update,f'🌍 {purpose} — اکانت {account["alias"]}\n'
+    if kind == 'new':
+        counts=context.user_data.get('region_probe_counts',{})
+        rows.insert(-1, [('🔄 بررسی مجدد مجوز لوکیشن‌ها', 'new:regions:refresh')])
+        summary=(f"✅ {len(regions)} ریجن با آزمایش مجوز AWS تأیید شد.\\n"
+                 f"🔒 {counts.get('blocked',0)} مسدود یا فاقد شبکه پیش‌فرض؛ "
+                 f"❔ {counts.get('unknown',0)} نامشخص؛ "
+                 f"🔐 {counts.get('inactive',0)} غیرفعال.\\n"
+                 'تست با Ubuntu 24.04 و t3.small انجام شده؛ ظرفیت، سهمیه و '
+                 'مشخصات دیگر ممکن است روی ساخت واقعی اثر بگذارند.')
+        return await show(update,f'🌍 {purpose} — اکانت {account["alias"]}\\n'
+                          f'صفحه {page+1}/{total_pages}\\n{summary}',keyboard(rows))
+    await show(update,f'🌍 {purpose} — اکانت {account["alias"]}\\n'
                 f'کشور و لوکیشن را انتخاب کن (صفحه {page+1} از {total_pages}):',keyboard(rows))
 
 
@@ -156,12 +168,28 @@ async def region_menu(update,context,kind,account_id):
     try:
         account=STORE.account(account_id)
         session=await run_io(session_for_account,account)
-        regions,inactive=await run_io(region_catalog,session)
-        if not regions: raise ValueError('No enabled regions were returned by AWS')
+        if kind == 'new':
+            await show(update,'⏳ در حال آزمایش مجوز ساخت سرور در ریجن‌های این اکانت (بدون ساخت سرور)...')
+            regions,blocked,unknown,inactive=await run_io(find_launchable_regions,session)
+            context.user_data['region_probe_counts']={
+                'blocked':len(blocked), 'unknown':len(unknown), 'inactive':len(inactive)
+            }
+        else:
+            regions,inactive=await run_io(region_catalog,session)
         context.user_data['account_id']=account_id
         context.user_data['region_kind']=kind
         context.user_data['region_choices']=regions
         context.user_data['region_inactive']=inactive
+        if not regions:
+            if kind == 'new':
+                return await show(update,
+                    f'⚠️ هیچ ریجنی با اجازه ساخت سرور برای اکانت {account["alias"]} تأیید نشد.\\n'
+                    'ریجن‌های مسدود و نامشخص عمداً نمایش داده نمی‌شوند. '
+                    'اگر AWS Project / Free Plan داری، محدودیت ریجن پروژه یا SCP را بررسی کن. '
+                    'به‌صورت خودکار سروری ساخته نشده است.',
+                    keyboard([[('🔄 آزمایش مجدد', 'new:regions:refresh')],
+                              [('🔗 انتخاب اکانت دیگر', 'new'), ('🏠 منو', 'home')]]))
+            raise ValueError('No enabled regions were returned by AWS')
         await show_region_page(update,context,kind,0)
     except Exception as exc:
         await show(update,'❌ '+error_message(exc),home_buttons())
@@ -626,6 +654,11 @@ async def on_click(update:Update,context:ContextTypes.DEFAULT_TYPE):
             context.user_data.clear()
             if data=='new': context.user_data['wizard']={}
             return await show(update,'🔗 اکانت را انتخاب کن:',account_keyboard(f'{data}:a'))
+        if data == 'new:regions:refresh':
+            account_id=context.user_data.get('account_id')
+            if not account_id or context.user_data.get('region_kind')!='new':
+                raise ValueError('ابتدا اکانت را دوباره برای ساخت سرور انتخاب کن.')
+            return await region_menu(update,context,'new',account_id)
         if data.startswith('new:a:'):
             aid=int(data.split(':')[2]); context.user_data['wizard']={'account_id':aid}
             return await region_menu(update,context,'new',aid)
