@@ -101,7 +101,7 @@ _MAX_BULK_RANGES = 20
 
 def parse_port_list(value):
     """Parse at most 20 comma/space/newline-delimited ports or port ranges."""
-    parts = [p for p in re.split(r'[,،\\s]+', value.strip()) if p]
+    parts = [p for p in re.split(r'[,،\s]+', value.strip()) if p]
     if not parts or len(parts) > _MAX_BULK_RANGES:
         raise ValueError('Send 1-20 ports/ranges, e.g. 80,443,8080-8090')
     return list(dict.fromkeys(parse_port(p) for p in parts))
