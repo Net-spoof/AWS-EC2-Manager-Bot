@@ -24,6 +24,7 @@ A pragmatic owner-only implementation for provisioning multi-OS EC2 instances an
 | Unified, paginated EC2 inventory across all enabled Regions after selecting an account | ✅ (v1.7) |
 | On-Demand hourly/monthly estimate in existing server details, with actual EBS metadata | ✅ (v1.7) |
 | In-bot EC2 Security Group: ping on/off, TCP/UDP ingress, list/remove rules | ✅ (v1.1) |
+| Bulk Security Group controls: all TCP/UDP ports to a chosen IPv4 CIDR, public excluding management ports, multi-port rules, bulk cleanup | ✅ (v1.8) |
 | Rotate an existing EC2 root password over verified SSH | ✅ (v1.1; existing root login required) |
 | Show IP, status, type, start/stop/reboot and CPU average | ✅ |
 | Two-stage terminate confirmation | ✅ |
@@ -32,6 +33,17 @@ A pragmatic owner-only implementation for provisioning multi-OS EC2 instances an
 | Automatic Elastic IP allocation and dedicated VPC construction | ❌ (not in this release) |
 | Automatic removal of orphaned Security Groups/Key Pairs | ❌ (manual AWS cleanup) |
 | Automatic recurring cost alerts | ❌ (use AWS Budgets) |
+
+### Bulk port management (Security Groups)
+
+From **Servers → select instance → Firewall/Ping → select an attached Security Group**, use:
+
+- **All ports for a specific IP**: enter your IPv4/CIDR manually (e.g. `198.51.100.20/32`). The Telegram Bot API does not expose your public IP. Adds TCP and UDP port 1–65535 rules scoped to that CIDR.
+- **All ports for everyone**: uses `0.0.0.0/0`, but intentionally does **not** add public TCP 22, TCP 3389, or UDP 3389 access. Requires a confirmation and clearly warns about exposure.
+- **Multiple ports**: send up to 20 comma, Persian-comma, space or newline-delimited ranges (e.g. `80,443,8080,10000-10010`), select TCP/UDP/both and a CIDR. Duplicate exact existing rules are skipped.
+- **Close bot bulk rules**: explicitly confirm the removal of *only* rules tagged `AWS-EC2-Manager-Bot bulk`. Older/other SG rules are not removed. This can still disrupt server management if its only route uses a bulk rule.
+
+Every operation is validated against a Security Group **currently attached to the selected EC2 instance**, uses the already authorized AWS account/Region, and logs actual changes. A confirmation displays how many instances share that SG. **Security Groups may affect multiple servers**, not only the selected instance. Changes are limited to AWS ingress; UFW, nftables, Windows Firewall and service listeners still need separate configuration. Bulk operations may fail if the SG reaches AWS ingress-rule quotas. AWS permissions for Security Group describe/authorize/revoke are included in the sample IAM policy.
 
 ## 1. GitHub repository
 
