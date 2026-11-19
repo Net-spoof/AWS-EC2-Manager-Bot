@@ -3,6 +3,8 @@
 Only IPv4 ingress is created here. Server-side lookups recheck group ownership and
 SSH-protecting rules cannot be removed via the Telegram UI.
 """
+import re
+
 from .aws_api import AWS_CONFIG, validate_cidr
 
 
@@ -88,6 +90,118 @@ def add_port(session, region, instance_id, group_id, protocol, port_start, port_
         GroupId=group_id,
         IpPermissions=[{'IpProtocol': protocol, 'FromPort': port_start, 'ToPort': port_end,
                         'IpRanges': [{'CidrIp': cidr, 'Description': 'AWS-EC2-Manager-Bot'}]}])
+
+
+
+# All bulk changes remain scoped to a Security Group currently attached to the selected
+# EC2 instance. AWS Security Groups can be shared by several EC2 instances.
+_BULK_DESCRIPTION = 'AWS-EC2-Manager-Bot bulk'
+_MAX_BULK_RANGES = 20
+
+
+def parse_port_list(value):
+    """Parse at most 20 comma/space/newline-delimited ports or port ranges."""
+    parts = [p for p in re.split(r'[,،\s]+', value.strip()) if p]
+    if not parts or len(parts) > _MAX_BULK_RANGES:
+        raise ValueError('Send 1-20 ports/ranges, e.g. 80,443,8080-8090')
+    return list(dict.fromkeys(parse_port(p) for p in parts))
+
+
+def _apply_bulk(session, region, instance_id, group_id, entries, cidr):
+    """Add ingress permissions in one AWS API request, skipping exact existing rules."""
+    require_group(session, region, instance_id, group_id)
+    cidr = validate_cidr(cidr)
+    entries = list(dict.fromkeys(entries))
+    if not entries:
+        raise ValueError('No ports selected')
+    if len(entries) > 50:
+        raise ValueError('Too many security group rules for one operation')
+    for proto, start, end in entries:
+        if proto not in ('tcp', 'udp') or not (1 <= start <= end <= 65535):
+            raise ValueError('Invalid TCP/UDP port range')
+        if cidr == '0.0.0.0/0' and (
+            (proto == 'tcp' and (start <= 22 <= end or start <= 3389 <= end))
+            or (proto == 'udp' and start <= 3389 <= end)
+        ):
+            raise ValueError('Refusing public SSH/RDP access; use a private /32 CIDR')
+
+    current = rules_for_instance(session, region, instance_id, group_id)
+    existing = {(str(r.get('IpProtocol', '')).lower(), r.get('FromPort'),
+                 r.get('ToPort'), r.get('CidrIpv4')) for r in current}
+    missing = [item for item in entries if (*item, cidr) not in existing]
+    if not missing:
+        return 0
+    permissions = [
+        {'IpProtocol': proto, 'FromPort': start, 'ToPort': end,
+         'IpRanges': [{'CidrIp': cidr, 'Description': _BULK_DESCRIPTION}]}
+        for proto, start, end in missing
+    ]
+    _ec2(session, region).authorize_security_group_ingress(
+        GroupId=group_id, IpPermissions=permissions)
+    return len(missing)
+
+
+def add_port_batch(session, region, instance_id, group_id, protocols, ports, cidr):
+    """Open multiple requested ports for TCP, UDP or both protocols."""
+    protocols = list(dict.fromkeys(protocols))
+    ports = list(ports)
+    if not protocols or any(p not in ('tcp', 'udp') for p in protocols):
+        raise ValueError('Select TCP and/or UDP')
+    if not 1 <= len(ports) <= _MAX_BULK_RANGES:
+        raise ValueError('Send 1-20 port ranges')
+    return _apply_bulk(
+        session, region, instance_id, group_id,
+        [(proto, start, end) for proto in protocols for start, end in ports], cidr)
+
+
+def open_all_ports(session, region, instance_id, group_id, cidr):
+    """Open all TCP/UDP ports to a chosen CIDR. Public mode excludes SSH/RDP.
+
+    For 0.0.0.0/0 we deliberately exclude TCP 22, TCP 3389 and UDP 3389.
+    Existing access rules (including SSH/RDP) are never modified.
+    """
+    cidr = validate_cidr(cidr)
+    if cidr == '0.0.0.0/0':
+        entries = [
+            ('tcp', 1, 21), ('tcp', 23, 3388), ('tcp', 3390, 65535),
+            ('udp', 1, 3388), ('udp', 3390, 65535)
+        ]
+    else:
+        entries = [('tcp', 1, 65535), ('udp', 1, 65535)]
+    return _apply_bulk(session, region, instance_id, group_id, entries, cidr)
+
+
+def managed_bulk_rules(rules):
+    """Only rules stamped by these bulk controls can be bulk-revoked."""
+    return [r for r in rules if r.get('Description') == _BULK_DESCRIPTION
+            and r.get('SecurityGroupRuleId') and not r.get('IsEgress', False)]
+
+
+def close_bulk_ports(session, region, instance_id, group_id):
+    """Remove bot-created bulk rules, leaving all other SG rules unchanged."""
+    rules = rules_for_instance(session, region, instance_id, group_id)
+    ids = [r['SecurityGroupRuleId'] for r in managed_bulk_rules(rules)]
+    if not ids:
+        return 0
+    # This can remove a bulk permission covering management ports. The UI requires
+    # a separate confirmation warning of potential SSH/RDP loss of access.
+    _ec2(session, region).revoke_security_group_ingress(
+        GroupId=group_id, SecurityGroupRuleIds=ids)
+    return len(ids)
+
+
+def group_instance_count(session, region, instance_id, group_id):
+    """Number of instances potentially affected by the shared Security Group."""
+    require_group(session, region, instance_id, group_id)
+    ec2 = _ec2(session, region)
+    pages = ec2.get_paginator('describe_instances')
+    ids = set()
+    for page in pages.paginate(Filters=[{'Name': 'instance.group-id', 'Values': [group_id]}]):
+        for reservation in page.get('Reservations', []):
+            for instance in reservation.get('Instances', []):
+                if instance.get('State', {}).get('Name') != 'terminated':
+                    ids.add(instance['InstanceId'])
+    return len(ids)
 
 
 def public_ping_enabled(rules):

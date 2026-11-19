@@ -25,7 +25,9 @@ from .aws_api import (REGIONS, TYPES, available_regions, control_instance, cpu_m
                       valid_alias, validate_cidr)
 from .storage import Store
 from .firewall import (attached_groups, rules_for_instance, parse_port, fmt_rule,
-                       is_ssh_protecting, add_port, enable_ping, disable_ping, remove_rule, public_ping_enabled)
+                       is_ssh_protecting, add_port, enable_ping, disable_ping, remove_rule, public_ping_enabled,
+                       parse_port_list, add_port_batch, open_all_ports, managed_bulk_rules,
+                       close_bulk_ports, group_instance_count)
 from .ssh_password import ssh_fingerprint, change_root_password
 from .regions import format_region, region_button_rows, inactive_region_rows
 from .pricing import quote_on_demand, display_quote, os_from_instance, pricing_error_text
@@ -391,13 +393,13 @@ def fw_context(context):
     return state
 
 
-async def firewall_screen(update,context):
+async def firewall_screen(update,context,notice=None):
     w=fw_context(context)
     account=STORE.account(w['account_id'])
     sess=await run_io(session_for_account,account)
     rules=await run_io(rules_for_instance,sess,w['region'],w['instance_id'],w['group_id'])
     ping=public_ping_enabled(rules)
-    lines=[f"🛡 فایروال EC2 / {w['instance_id']}",f"Security Group: {w['group_id']}",
+    lines=([notice] if notice else []) + [f"🛡 فایروال EC2 / {w['instance_id']}",f"Security Group: {w['group_id']}",
            f"Ping عمومی: {'✅ فعال' if ping else '❌ غیرفعال'}",
            'قوانین Security Group ممکن است روی سرورهای دیگر هم تأثیر بگذارند.',
            'قوانین ورودی:']
@@ -405,6 +407,10 @@ async def firewall_screen(update,context):
     if len(rules)>24: lines.append(f'... و {len(rules)-24} قانون دیگر')
     rows=[[('🔕 غیرفعال کردن Ping','fw:pingoff') if ping else ('✅ فعال کردن Ping','fw:pingon')],
           [('➕ قانون TCP','fw:add:tcp'),('➕ قانون UDP','fw:add:udp')],
+          [('🔐 باز کردن همه پورت‌ها برای IP مشخص','fw:all:private')],
+          [('🌐 همه پورت‌ها عمومی (به‌جز SSH/RDP)','fw:all:public')],
+          [('🔢 باز کردن چند پورت یکجا','fw:multi')],
+          [('🧹 بستن قوانین گروهی ربات','fw:bulkclose')],
           [('⚡ نود پاسارگارد (TCP 62050–62051)','fw:pg')],
           [('🔄 بروزرسانی','fw:refresh')]]
     for r in rules[:20]:
@@ -415,6 +421,34 @@ async def firewall_screen(update,context):
     rows.append([('⬅️ سرور',f"i:{w['account_id']}:{w['region']}:{w['instance_id']}")])
     await show(update,'\n'.join(lines),keyboard(rows))
 
+
+async def bulk_confirm_screen(update,context):
+    w=fw_context(context)
+    bulk=w.get('bulk')
+    if not bulk or bulk.get('kind') not in ('all','multi') or not bulk.get('cidr'):
+        raise ValueError('Bulk port session expired')
+    account=STORE.account(w['account_id'])
+    sess=await run_io(session_for_account,account)
+    affected=await run_io(group_instance_count,sess,w['region'],w['instance_id'],w['group_id'])
+    if bulk['kind']=='all':
+        selection='همه پورت‌های TCP و UDP (1–65535)'
+        if bulk['cidr']=='0.0.0.0/0':
+            selection+='\nاستثنا: TCP 22 و TCP/UDP 3389 برای مدیریت سرور'
+    else:
+        ports=', '.join(str(a) if a==b else f'{a}-{b}' for a,b in bulk['ports'])
+        selection=f"{'/'.join(p.upper() for p in bulk['protocols'])}: {ports}"
+    danger='⚠️ دسترسی عمومی برای کل اینترنت!\n' if bulk['cidr']=='0.0.0.0/0' else ''
+    impact=f'⚠️ این Security Group روی {affected} سرور متصل است.\n' if affected>1 else ''
+    return await show(update,
+        f"🔐 تأیید تغییر گروهی فایروال\n"
+        f"Security Group: {w['group_id']}\n"
+        f"پورت‌ها: {selection}\n"
+        f"محدوده IPv4 مجاز: {bulk['cidr']}\n"
+        f"{danger}{impact}"
+        "⚠️ این کار فقط Security Group در AWS را تغییر می‌دهد؛ فایروال سیستم‌عامل جداست.\n"
+        "قوانین کنونی حذف یا جایگزین نمی‌شوند.",
+        keyboard([[('✅ تأیید و اعمال در AWS','fw:bulkgo')],
+                  [('❌ لغو','fw:refresh')]]))
 
 def _ssh_state(context):
     state=context.user_data.get('ssh_change')
@@ -444,6 +478,26 @@ async def accept_text(update,context):
             warning='⚠️ این پورت برای کل اینترنت باز خواهد شد.\n' if w['cidr']=='0.0.0.0/0' else ''
             return await show(update,f"{warning}تأیید باز کردن {w['protocol'].upper()} {w['port_start']}-{w['port_end']} برای {w['cidr']} در {w['group_id']}؟", keyboard([
                 [('✅ تأیید افزودن قانون','fw:go')],[('لغو','fw:refresh')]]))
+
+        if pending=='fw_multi_ports':
+            w=fw_context(context)
+            bulk=w.get('bulk')
+            if not bulk or bulk.get('kind')!='multi':
+                raise ValueError('Start bulk port entry again')
+            bulk['ports']=parse_port_list(raw)
+            context.user_data['pending']=None
+            return await show(update,'🔌 پروتکل این پورت‌ها را انتخاب کن.',keyboard([
+                [('TCP','fw:multi:tcp'),('UDP','fw:multi:udp')],
+                [('TCP + UDP','fw:multi:both')],
+                [('❌ لغو','fw:refresh')]]))
+        if pending in ('fw_bulk_cidr','fw_multi_cidr'):
+            w=fw_context(context)
+            bulk=w.get('bulk')
+            if not bulk or bulk.get('kind') not in ('all','multi'):
+                raise ValueError('Start bulk port entry again')
+            bulk['cidr']=validate_cidr(raw)
+            context.user_data['pending']=None
+            return await bulk_confirm_screen(update,context)
         if pending=='pw_current':
             if not 1 <= len(raw) <= 256:
                 context.user_data.clear()
@@ -556,6 +610,9 @@ async def on_click(update:Update,context:ContextTypes.DEFAULT_TYPE):
             return await firewall_screen(update,context)
         if data=='fw:refresh':
             context.user_data['pending']=None
+            w=fw_context(context)
+            w.pop('bulk',None)
+            w.pop('bulk_close_ready',None)
             return await firewall_screen(update,context)
         if data=='fw:pingon':
             w=fw_context(context);account=STORE.account(w['account_id'])
@@ -581,6 +638,92 @@ async def on_click(update:Update,context:ContextTypes.DEFAULT_TYPE):
             for k in ('port_start','port_end','cidr'):w.pop(k,None)
             context.user_data['pending']='fw_port'
             return await show(update,f'🔌 شماره پورت {proto.upper()} را بفرست. مثال: `443` یا `10000-10010`.')
+
+        if data=='fw:all:private':
+            w=fw_context(context)
+            w.pop('bulk_close_ready',None)
+            w['bulk']={'kind':'all'}
+            context.user_data['pending']='fw_bulk_cidr'
+            return await show(update,
+                '🔐 آدرس IPv4 خودت یا یک CIDR مشخص را بفرست. مثال: `203.0.113.5/32`.\n'
+                'تلگرام IP واقعی شما را به ربات نمی‌دهد؛ باید آن را خودت وارد کنی.\n'
+                'همه پورت‌های TCP و UDP فقط برای همین IP/CIDR باز می‌شوند.',
+                keyboard([[('❌ لغو','fw:refresh')]]))
+        if data=='fw:all:public':
+            w=fw_context(context)
+            w.pop('bulk_close_ready',None)
+            w['bulk']={'kind':'all','cidr':'0.0.0.0/0'}
+            context.user_data['pending']=None
+            return await bulk_confirm_screen(update,context)
+        if data=='fw:multi':
+            w=fw_context(context)
+            w.pop('bulk_close_ready',None)
+            w['bulk']={'kind':'multi'}
+            context.user_data['pending']='fw_multi_ports'
+            return await show(update,
+                '🔢 پورت‌ها را یکجا بفرست. مثال: `80,443,8080,10000-10010`\n'
+                'حداکثر ۲۰ پورت/بازه در هر درخواست.',
+                keyboard([[('❌ لغو','fw:refresh')]]))
+        if data.startswith('fw:multi:'):
+            proto=data.split(':')[2]
+            if proto not in ('tcp','udp','both'):
+                raise ValueError('Unsupported protocol')
+            w=fw_context(context)
+            bulk=w.get('bulk')
+            if not bulk or bulk.get('kind')!='multi' or not bulk.get('ports'):
+                raise ValueError('Select ports first')
+            bulk['protocols']=['tcp','udp'] if proto=='both' else [proto]
+            context.user_data['pending']='fw_multi_cidr'
+            return await show(update,
+                '🌐 محدوده IPv4 مجاز را بفرست، مثل `203.0.113.5/32` یا `0.0.0.0/0`.\n'
+                'برای SSH/RDP دسترسی عمومی مجاز نیست.',
+                keyboard([[('❌ لغو','fw:refresh')]]))
+        if data=='fw:bulkgo':
+            w=fw_context(context)
+            bulk=w.pop('bulk',None)   # consume confirmation before the AWS write
+            context.user_data['pending']=None
+            if not bulk or not bulk.get('cidr'):
+                raise ValueError('Bulk port confirmation expired')
+            account=STORE.account(w['account_id'])
+            sess=await run_io(session_for_account,account)
+            if bulk.get('kind')=='all':
+                count=await run_io(open_all_ports,sess,w['region'],w['instance_id'],
+                                   w['group_id'],bulk['cidr'])
+            elif bulk.get('kind')=='multi' and bulk.get('protocols') and bulk.get('ports'):
+                count=await run_io(add_port_batch,sess,w['region'],w['instance_id'],
+                                   w['group_id'],bulk['protocols'],bulk['ports'],bulk['cidr'])
+            else:
+                raise ValueError('Incomplete bulk port selection')
+            if count: STORE.log(w['account_id'],'add_bulk_ports',w['region'],w['group_id'])
+            return await firewall_screen(update,context,f'✅ {count} قانون جدید اضافه شد.')
+        if data=='fw:bulkclose':
+            w=fw_context(context)
+            account=STORE.account(w['account_id'])
+            sess=await run_io(session_for_account,account)
+            rules=await run_io(rules_for_instance,sess,w['region'],w['instance_id'],w['group_id'])
+            n=len(managed_bulk_rules(rules))
+            if not n:
+                return await firewall_screen(update,context,'ℹ️ قانون گروهی قابل حذف وجود ندارد.')
+            affected=await run_io(group_instance_count,sess,w['region'],w['instance_id'],w['group_id'])
+            w['bulk_close_ready']=True
+            context.user_data['pending']=None
+            impact=f'\n⚠️ این گروه روی {affected} سرور اثر دارد.' if affected>1 else ''
+            return await show(update,
+                f'⚠️ حذف {n} قانون گروهی که همین ربات ایجاد کرده؟\n'
+                f"Security Group: {w['group_id']}{impact}\n"
+                'سایر قوانین، از جمله قوانین قدیمی SSH/RDP و Ping، دست‌نخورده می‌مانند.\n'
+                'اما اگر مدیریت سرور از قوانین گروهی عبور می‌کند، ممکن است دسترسی SSH/RDP قطع شود.',
+                keyboard([[('🗑 تأیید حذف گروهی','fw:bulkclosego')],
+                          [('❌ لغو','fw:refresh')]]))
+        if data=='fw:bulkclosego':
+            w=fw_context(context)
+            if not w.pop('bulk_close_ready',False):
+                raise ValueError('Bulk removal confirmation expired')
+            account=STORE.account(w['account_id'])
+            sess=await run_io(session_for_account,account)
+            count=await run_io(close_bulk_ports,sess,w['region'],w['instance_id'],w['group_id'])
+            if count: STORE.log(w['account_id'],'remove_bulk_ports',w['region'],w['group_id'])
+            return await firewall_screen(update,context,f'✅ {count} قانون گروهی حذف شد.')
         if data=='fw:pg':
             w=fw_context(context)
             w['protocol']='tcp'
