@@ -433,19 +433,19 @@ async def bulk_confirm_screen(update,context):
     if bulk['kind']=='all':
         selection='همه پورت‌های TCP و UDP (1–65535)'
         if bulk['cidr']=='0.0.0.0/0':
-            selection+='\\nاستثنا: TCP 22 و TCP/UDP 3389 برای مدیریت سرور'
+            selection+='\nاستثنا: TCP 22 و TCP/UDP 3389 برای مدیریت سرور'
     else:
         ports=', '.join(str(a) if a==b else f'{a}-{b}' for a,b in bulk['ports'])
         selection=f"{'/'.join(p.upper() for p in bulk['protocols'])}: {ports}"
-    danger='⚠️ دسترسی عمومی برای کل اینترنت!\\n' if bulk['cidr']=='0.0.0.0/0' else ''
-    impact=f'⚠️ این Security Group روی {affected} سرور متصل است.\\n' if affected>1 else ''
+    danger='⚠️ دسترسی عمومی برای کل اینترنت!\n' if bulk['cidr']=='0.0.0.0/0' else ''
+    impact=f'⚠️ این Security Group روی {affected} سرور متصل است.\n' if affected>1 else ''
     return await show(update,
-        f"🔐 تأیید تغییر گروهی فایروال\\n"
-        f"Security Group: {w['group_id']}\\n"
-        f"پورت‌ها: {selection}\\n"
-        f"محدوده IPv4 مجاز: {bulk['cidr']}\\n"
+        f"🔐 تأیید تغییر گروهی فایروال\n"
+        f"Security Group: {w['group_id']}\n"
+        f"پورت‌ها: {selection}\n"
+        f"محدوده IPv4 مجاز: {bulk['cidr']}\n"
         f"{danger}{impact}"
-        "⚠️ این کار فقط Security Group در AWS را تغییر می‌دهد؛ فایروال سیستم‌عامل جداست.\\n"
+        "⚠️ این کار فقط Security Group در AWS را تغییر می‌دهد؛ فایروال سیستم‌عامل جداست.\n"
         "قوانین کنونی حذف یا جایگزین نمی‌شوند.",
         keyboard([[('✅ تأیید و اعمال در AWS','fw:bulkgo')],
                   [('❌ لغو','fw:refresh')]]))
@@ -645,8 +645,8 @@ async def on_click(update:Update,context:ContextTypes.DEFAULT_TYPE):
             w['bulk']={'kind':'all'}
             context.user_data['pending']='fw_bulk_cidr'
             return await show(update,
-                '🔐 آدرس IPv4 خودت یا یک CIDR مشخص را بفرست. مثال: `203.0.113.5/32`.\\n'
-                'تلگرام IP واقعی شما را به ربات نمی‌دهد؛ باید آن را خودت وارد کنی.\\n'
+                '🔐 آدرس IPv4 خودت یا یک CIDR مشخص را بفرست. مثال: `203.0.113.5/32`.\n'
+                'تلگرام IP واقعی شما را به ربات نمی‌دهد؛ باید آن را خودت وارد کنی.\n'
                 'همه پورت‌های TCP و UDP فقط برای همین IP/CIDR باز می‌شوند.',
                 keyboard([[('❌ لغو','fw:refresh')]]))
         if data=='fw:all:public':
@@ -661,7 +661,7 @@ async def on_click(update:Update,context:ContextTypes.DEFAULT_TYPE):
             w['bulk']={'kind':'multi'}
             context.user_data['pending']='fw_multi_ports'
             return await show(update,
-                '🔢 پورت‌ها را یکجا بفرست. مثال: `80,443,8080,10000-10010`\\n'
+                '🔢 پورت‌ها را یکجا بفرست. مثال: `80,443,8080,10000-10010`\n'
                 'حداکثر ۲۰ پورت/بازه در هر درخواست.',
                 keyboard([[('❌ لغو','fw:refresh')]]))
         if data.startswith('fw:multi:'):
@@ -675,7 +675,7 @@ async def on_click(update:Update,context:ContextTypes.DEFAULT_TYPE):
             bulk['protocols']=['tcp','udp'] if proto=='both' else [proto]
             context.user_data['pending']='fw_multi_cidr'
             return await show(update,
-                '🌐 محدوده IPv4 مجاز را بفرست، مثل `203.0.113.5/32` یا `0.0.0.0/0`.\\n'
+                '🌐 محدوده IPv4 مجاز را بفرست، مثل `203.0.113.5/32` یا `0.0.0.0/0`.\n'
                 'برای SSH/RDP دسترسی عمومی مجاز نیست.',
                 keyboard([[('❌ لغو','fw:refresh')]]))
         if data=='fw:bulkgo':
@@ -707,11 +707,11 @@ async def on_click(update:Update,context:ContextTypes.DEFAULT_TYPE):
             affected=await run_io(group_instance_count,sess,w['region'],w['instance_id'],w['group_id'])
             w['bulk_close_ready']=True
             context.user_data['pending']=None
-            impact=f'\\n⚠️ این گروه روی {affected} سرور اثر دارد.' if affected>1 else ''
+            impact=f'\n⚠️ این گروه روی {affected} سرور اثر دارد.' if affected>1 else ''
             return await show(update,
-                f'⚠️ حذف {n} قانون گروهی که همین ربات ایجاد کرده؟\\n'
-                f"Security Group: {w['group_id']}{impact}\\n"
-                'سایر قوانین، از جمله قوانین قدیمی SSH/RDP و Ping، دست‌نخورده می‌مانند.\\n'
+                f'⚠️ حذف {n} قانون گروهی که همین ربات ایجاد کرده؟\n'
+                f"Security Group: {w['group_id']}{impact}\n"
+                'سایر قوانین، از جمله قوانین قدیمی SSH/RDP و Ping، دست‌نخورده می‌مانند.\n'
                 'اما اگر مدیریت سرور از قوانین گروهی عبور می‌کند، ممکن است دسترسی SSH/RDP قطع شود.',
                 keyboard([[('🗑 تأیید حذف گروهی','fw:bulkclosego')],
                           [('❌ لغو','fw:refresh')]]))
