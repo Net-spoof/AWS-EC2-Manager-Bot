@@ -41,7 +41,7 @@ ARGS = ('eu-north-1', 'i-123', 'sg-123')
 
 
 def test_parse_list_bilingual_separators_and_dedup():
-    assert parse_port_list('80,443، 8080-8082\\n443') == [
+    assert parse_port_list('80,443، 8080-8082\n443') == [
         (80, 80), (443, 443), (8080, 8082)
     ]
     for value in ('', '0', '65536', '100-99', '80;443',
